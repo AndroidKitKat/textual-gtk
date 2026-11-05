@@ -1,4 +1,4 @@
-# A /reconnect after a long stable session starts backoff from the bottom:
+# A /conn after a long stable session starts backoff from the bottom:
 # the 60 s reset applies even though the link ends from Quitting.
 ! connect
 > dial #1 irc.test:6667 plain

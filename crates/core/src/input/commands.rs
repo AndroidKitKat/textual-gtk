@@ -8,8 +8,7 @@
 pub enum Verb {
     Away,
     Close,
-    Connect,
-    Disconnect,
+    Conn,
     Invite,
     Join,
     Kick,
@@ -22,7 +21,6 @@ pub enum Verb {
     Query,
     Quit,
     Raw,
-    Reconnect,
     Topic,
     Whois,
 }
@@ -36,13 +34,11 @@ pub struct Spec {
 }
 
 /// Sorted by name. Aliases are Textual's (`j`, `leave`, `m`, `t`, `quote`,
-/// `remove`). `connect`, `disconnect` and `reconnect` are ours: Textual
-/// has them only as menu items and would send them to the server.
+/// `remove`).
 pub const COMMANDS: &[Spec] = &[
     spec("away", Verb::Away, "[comment]"),
     spec("close", Verb::Close, "[target]"),
-    spec("connect", Verb::Connect, ""),
-    spec("disconnect", Verb::Disconnect, "[comment]"),
+    spec("conn", Verb::Conn, "[server]"),
     spec("invite", Verb::Invite, "<nickname> [channel]"),
     spec("j", Verb::Join, "<channel[,channel]]> [key[,key]]"),
     spec("join", Verb::Join, "<channel[,channel]]> [key[,key]]"),
@@ -59,7 +55,6 @@ pub const COMMANDS: &[Spec] = &[
     spec("quit", Verb::Quit, "[comment]"),
     spec("quote", Verb::Raw, "<input>"),
     spec("raw", Verb::Raw, "<input>"),
-    spec("reconnect", Verb::Reconnect, ""),
     spec("remove", Verb::Close, "[target]"),
     spec("t", Verb::Topic, "<channel> [topic]"),
     spec("topic", Verb::Topic, "<channel> [topic]"),

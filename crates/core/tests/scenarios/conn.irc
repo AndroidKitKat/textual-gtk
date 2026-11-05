@@ -1,0 +1,30 @@
+# Textual's /conn [server]: connected, it quits and dials again; offline it
+# dials. A server named for it is dialled once, on port 6667 without TLS,
+# then the configured addresses come back. A bad address is refused.
+! welcome
+! type console /conn
+> QUIT :Textual GTK
+? quitting
+< ERROR :Closing Link
+> hangup #1
+> dial #2 irc.test:6667 plain
+? notice Disconnected: quit
+? notice Connecting to irc.test:6667
+? connecting
+! type console /conn bad!host
+? line console One or more arguments are not properly formatted for this command.
+? notice One or more arguments are not properly formatted for this command.
+? connecting
+! disconnect
+> hangup #2
+? notice Disconnected: quit
+! type console /conn Other.Test
+> dial #3 other.test:6667 plain
+? notice Connecting to other.test:6667
+! disconnect
+> hangup #3
+? notice Disconnected: quit
+! type console conn
+> dial #4 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+? connecting

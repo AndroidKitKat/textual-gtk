@@ -1,5 +1,6 @@
-# /reconnect: a quit while the network is still wanted online dials again
-# as soon as the quit is done, with no backoff.
+# Reconnecting (/conn, or the menu item later): a quit while the network
+# is still wanted online dials again as soon as the quit is done, with no
+# backoff.
 > CAP LS 302
 > NICK textual
 > USER textual 0 * Textual

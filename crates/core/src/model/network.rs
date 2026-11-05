@@ -341,6 +341,9 @@ pub struct Network {
     /// still backs off.
     failures: u32,
     next_address: usize,
+    /// Textual's `temporaryServerAddressOverride`, set by `/conn host`: the
+    /// next dial goes there, on 6667 without TLS, and only that one.
+    address_override: Option<String>,
     next_conn: u64,
     /// Outlive every link, so a reconnect finds its channels and queries.
     buffers: Buffers,
@@ -368,6 +371,7 @@ impl Network {
             link: Link::Offline { last: None },
             failures: 0,
             next_address: 0,
+            address_override: None,
             next_conn: 1,
             buffers,
         }
@@ -505,16 +509,22 @@ impl Network {
     }
 
     fn dial(&mut self, cx: &mut Cx, out: &mut Out) {
-        let addresses = &self.config.addresses;
-        let address = addresses[self.next_address].clone();
-        self.next_address = (self.next_address + 1) % addresses.len();
+        let (address, tls) = match self.address_override.take() {
+            Some(host) => (Address { host, port: 6667 }, Tls::Off),
+            None => {
+                let addresses = &self.config.addresses;
+                let address = addresses[self.next_address].clone();
+                self.next_address = (self.next_address + 1) % addresses.len();
+                (address, self.config.tls)
+            }
+        };
         let conn = ConnId(self.next_conn);
         self.next_conn += 1;
         self.notice(Notice::Connecting(address.clone()), cx, out);
         out.effects.push(Effect::Dial {
             conn,
             address: address.clone(),
-            tls: self.config.tls,
+            tls,
         });
         self.link = Link::Connecting {
             conn,
@@ -784,6 +794,11 @@ impl Network {
         )
     }
 
+    /// Where the next dial goes instead of the configured addresses.
+    pub(crate) fn override_address(&mut self, host: String) {
+        self.address_override = Some(host);
+    }
+
     /// Our nick: the session's, or the configured one before 001.
     pub fn nick(&self) -> &str {
         self.session()
@@ -942,7 +957,7 @@ impl Network {
                     last: why,
                 };
             }
-            // `/reconnect` is a quit with the network still wanted online.
+            // `/conn` is a quit with the network still wanted online.
             None if why == Ended::UserQuit && self.desired == Desired::Online => self.dial(cx, out),
             None => self.link = Link::Offline { last: Some(why) },
         }

@@ -242,12 +242,7 @@ impl Run<'_, '_, '_> {
                 }
             }
             Verb::Close => return self.close(args),
-            Verb::Connect => self.net.update(network::Input::Connect, self.cx, self.out),
-            Verb::Disconnect => self.disconnect(args),
-            Verb::Reconnect => {
-                self.disconnect("");
-                self.net.update(network::Input::Connect, self.cx, self.out);
-            }
+            Verb::Conn => self.conn(args),
             Verb::Raw if connected => match args {
                 "" => self.invalid(spec),
                 line => self.raw(line),
@@ -481,6 +476,24 @@ impl Run<'_, '_, '_> {
         After::Focus(id)
     }
 
+    /// `/conn [server]` (`IRCClient.m:3197-3225`): a link that is up or on
+    /// its way quits and dials again, an absent one dials. A server given
+    /// is the next dial's address.
+    fn conn(&mut self, args: &str) {
+        let host = token(args).0.to_lowercase();
+        if !host.is_empty() {
+            if !is_internet_address(&host) {
+                self.print(BAD_ARGUMENTS);
+                return;
+            }
+            self.net.override_address(host);
+        }
+        if self.net.is_connected() || matches!(self.net.link(), network::Link::Connecting { .. }) {
+            self.disconnect("");
+        }
+        self.net.update(network::Input::Connect, self.cx, self.out);
+    }
+
     fn disconnect(&mut self, reason: &str) {
         let reason = if reason.is_empty() {
             LEAVING_COMMENT
@@ -631,4 +644,14 @@ impl Run<'_, '_, '_> {
             }
         }
     }
+}
+
+/// Textual's `isValidInternetAddress`: an IP address, `localhost`, or
+/// only letters, digits, `_`, `-` and `.`.
+fn is_internet_address(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>().is_ok()
+        || host == "localhost"
+        || host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
