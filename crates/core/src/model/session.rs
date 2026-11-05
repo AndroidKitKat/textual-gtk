@@ -3,6 +3,8 @@
 //! live `Link` variant, so a disconnect drops all of it; the buffers
 //! outlive it and are parted when the link ends.
 
+use std::time::Duration;
+
 use crate::irc::caps::Caps;
 use crate::irc::casemap::CaseMapping;
 use crate::irc::isupport::Isupport;
@@ -10,7 +12,7 @@ use crate::irc::{Message, Source, WireLine};
 use crate::line::{Destination, Line, LineType};
 use crate::model::Change;
 use crate::model::Cx;
-use crate::model::buffer::{BufferId, Buffers, Joined, Sync};
+use crate::model::buffer::{BufferId, Buffers, Joined, Rejoin, Sync};
 use crate::model::members::{Member, MemberDiff, ModeBits};
 use crate::model::network::{ConnId, Effect, Out};
 use crate::model::registration::Registered;
@@ -20,6 +22,8 @@ use crate::model::registration::Registered;
 const WHO_MAX_MEMBERS: usize = 500;
 /// Marks our own WHOX query, so its 354 replies can be told apart.
 const WHOX_TOKEN: &str = "152";
+/// Textual's `joinKickedChannel` delay (IRCClient.m:7353).
+const KICK_REJOIN_DELAY: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
 pub struct Session {
@@ -288,7 +292,8 @@ impl Handler<'_, '_> {
                 Some(id) => id,
                 None => {
                     let id = self.cx.ids.buffer();
-                    self.buffers.add_channel(id, channel, &mut self.out.changes)
+                    self.buffers
+                        .add_channel(id, channel, Rejoin::No, &mut self.out.changes)
                 }
             };
             // A bouncer replays JOIN for channels we are already in.
@@ -327,7 +332,15 @@ impl Handler<'_, '_> {
         };
         self.print(msg);
         if self.s.is_me(nick) {
-            self.buffers.part(id, &mut self.out.changes);
+            if kicked.is_some() {
+                let at = self.cx.now.mono + KICK_REJOIN_DELAY;
+                self.buffers.part(id, Rejoin::At(at), &mut self.out.changes);
+                let text = "Attempting to rejoin channel in three seconds";
+                let line = Line::client(self.cx.stamp(), text.to_owned());
+                self.buffers.print(id, line, &mut self.out.changes);
+            } else {
+                self.buffers.part(id, Rejoin::No, &mut self.out.changes);
+            }
         } else {
             let key = casemap.nick(nick);
             self.with_members(id, |joined, _| joined.members.remove(&key));

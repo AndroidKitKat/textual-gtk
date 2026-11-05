@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::rc::Rc;
+use std::time::Instant;
 
 use crate::irc::casemap::CaseMapping;
 use crate::line::{Line, LineType};
@@ -56,8 +57,23 @@ pub enum Body {
 /// leave any of them behind.
 #[derive(Debug)]
 pub enum ChannelState {
-    Parted,
+    /// Not in the channel. `rejoin` says whether and when we JOIN it again.
+    Parted {
+        rejoin: Rejoin,
+    },
     Joined(Joined),
+}
+
+/// Why a parted channel will be joined. Configured autojoin channels and
+/// channels we were in when the link ended wait for 001; a KICK waits 3 s
+/// (Textual's `joinKickedChannel` after 3.0 s, IRCClient.m:7348).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rejoin {
+    /// We left on purpose. Only a configured autojoin channel is joined
+    /// again, as Textual's `performAutoJoin` does for every inactive one.
+    No,
+    OnConnect,
+    At(Instant),
 }
 
 #[derive(Debug)]
@@ -186,6 +202,14 @@ impl Buffer {
         }
     }
 
+    /// `None` unless this is a parted channel.
+    pub fn rejoin(&self) -> Option<Rejoin> {
+        match self.body {
+            Body::Channel(ChannelState::Parted { rejoin }) => Some(rejoin),
+            _ => None,
+        }
+    }
+
     pub fn counters(&self) -> Counters {
         self.counters
     }
@@ -216,6 +240,13 @@ impl Buffer {
     fn joined_mut(&mut self) -> Option<&mut Joined> {
         match &mut self.body {
             Body::Channel(ChannelState::Joined(joined)) => Some(joined),
+            _ => None,
+        }
+    }
+
+    fn rejoin_mut(&mut self) -> Option<&mut Rejoin> {
+        match &mut self.body {
+            Body::Channel(ChannelState::Parted { rejoin }) => Some(rejoin),
             _ => None,
         }
     }
@@ -288,6 +319,7 @@ impl Buffers {
         &mut self,
         id: BufferId,
         name: &str,
+        rejoin: Rejoin,
         changes: &mut Vec<Change>,
     ) -> BufferId {
         let at = 1 + self
@@ -295,7 +327,7 @@ impl Buffers {
             .iter()
             .filter(|b| matches!(b.body, Body::Channel(_)))
             .count();
-        let body = Body::Channel(ChannelState::Parted);
+        let body = Body::Channel(ChannelState::Parted { rejoin });
         self.list.insert(at, Buffer::new(id, name, body));
         changes.push(Change::BufferAdded(id));
         id
@@ -331,7 +363,7 @@ impl Buffers {
     /// Marks a channel joined. `false` if it already was.
     pub(crate) fn join(&mut self, id: BufferId, changes: &mut Vec<Change>) -> bool {
         match self.get_mut(id).map(|b| &mut b.body) {
-            Some(Body::Channel(state @ ChannelState::Parted)) => {
+            Some(Body::Channel(state @ ChannelState::Parted { .. })) => {
                 *state = ChannelState::Joined(Joined::new());
                 changes.push(Change::BufferChanged(id));
                 true
@@ -340,11 +372,11 @@ impl Buffers {
         }
     }
 
-    pub(crate) fn part(&mut self, id: BufferId, changes: &mut Vec<Change>) {
+    pub(crate) fn part(&mut self, id: BufferId, rejoin: Rejoin, changes: &mut Vec<Change>) {
         if let Some(Body::Channel(state @ ChannelState::Joined(_))) =
             self.get_mut(id).map(|b| &mut b.body)
         {
-            *state = ChannelState::Parted;
+            *state = ChannelState::Parted { rejoin };
             changes.push(Change::Members {
                 buffer: id,
                 diff: MemberDiff::Reset,
@@ -353,7 +385,8 @@ impl Buffers {
         }
     }
 
-    /// The link ended: every channel is parted.
+    /// The link ended: every channel is parted, and each one that was open
+    /// or waiting to be rejoined is joined again at the next 001.
     pub(crate) fn part_all(&mut self, changes: &mut Vec<Change>) {
         let joined: Vec<BufferId> = self
             .list
@@ -362,8 +395,41 @@ impl Buffers {
             .map(|b| b.id)
             .collect();
         for id in joined {
-            self.part(id, changes);
+            self.part(id, Rejoin::OnConnect, changes);
         }
+        for rejoin in self.list.iter_mut().filter_map(Buffer::rejoin_mut) {
+            if matches!(rejoin, Rejoin::At(_)) {
+                *rejoin = Rejoin::OnConnect;
+            }
+        }
+    }
+
+    /// When the first kicked channel is due to be joined again.
+    pub(crate) fn next_rejoin(&self) -> Option<Instant> {
+        self.list
+            .iter()
+            .filter_map(|b| match b.rejoin() {
+                Some(Rejoin::At(at)) => Some(at),
+                _ => None,
+            })
+            .min()
+    }
+
+    /// The kicked channels whose wait is over. They move to `OnConnect`,
+    /// so a link that drops before the server's JOIN still rejoins them
+    /// and a second wake does not send another JOIN.
+    pub(crate) fn take_due_rejoins(&mut self, now: Instant) -> Vec<BufferId> {
+        let mut due = Vec::new();
+        for b in &mut self.list {
+            let id = b.id;
+            if let Some(rejoin) = b.rejoin_mut()
+                && matches!(rejoin, Rejoin::At(at) if *at <= now)
+            {
+                *rejoin = Rejoin::OnConnect;
+                due.push(id);
+            }
+        }
+        due
     }
 
     /// The end of the print funnel: keeps the line unless this buffer

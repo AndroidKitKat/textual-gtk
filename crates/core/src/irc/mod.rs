@@ -1,6 +1,7 @@
 pub mod caps;
 pub mod casemap;
 pub mod isupport;
+pub mod join;
 mod message;
 pub mod sasl;
 

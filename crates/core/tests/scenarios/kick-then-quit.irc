@@ -1,0 +1,16 @@
+# A kick followed by a quit: when the three seconds run out the link is
+# already quitting, so no JOIN goes out; the channel waits for the next
+# connect.
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+< :op!o@h KICK #c textual :bye
+! disconnect
+> QUIT
+@ +3s
+? quitting
+? rejoin #c on-connect
+@ wake
+> hangup #1
+? notice Disconnected: quit
+? offline user-quit

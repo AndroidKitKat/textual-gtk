@@ -1,0 +1,31 @@
+# A quit and a later connect restore the channels that were open, as well
+# as the configured ones, and the sidebar keeps them while offline.
+= autojoin #conf
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+> JOIN #conf
+< :textual!u@h JOIN #conf
+> MODE #conf
+< :textual!u@h JOIN #adhoc
+> MODE #adhoc
+! disconnect bye
+> QUIT bye
+< ERROR :Closing Link: textual (Quit: bye)
+> hangup #1
+? notice Disconnected: quit
+? offline user-quit
+? buffers = console #conf #adhoc
+? parted #conf
+? rejoin #adhoc on-connect
+! connect
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+> JOIN #conf,#adhoc
+? registered textual

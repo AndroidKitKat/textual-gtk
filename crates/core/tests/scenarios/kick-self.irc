@@ -1,6 +1,7 @@
 # KICK of another member removes it. KICK or PART of ourselves parts the
 # buffer: it stays in the sidebar with no members, topic or modes, and
-# lines for it are dropped until we join again.
+# lines for it are dropped until we join again. A KICK also says it will
+# rejoin in three seconds (kick-rejoin.irc); a PART does not rejoin.
 ! welcome
 < :irc.test 005 textual CHANTYPES=# :are supported by this server
 < :textual!u@h JOIN #c
@@ -15,16 +16,18 @@
 ? line #c op kicked bob from the channel (spam)
 ? members #c = @op textual
 < :op!o@h KICK #c textual :bye
-? line #c op kicked textual from the channel (bye)
+? line-before #c op kicked textual from the channel (bye)
+? line #c Attempting to rejoin channel in three seconds
 ? parted #c
+? rejoin #c 3s
 ? members #c =
 ? topic #c none
 ? modes #c
 ? buffers = console #c
-? lines #c 5
+? lines #c 6
 < :op!o@h PRIVMSG #c :you cannot see this
 < :op!o@h KICK #c textual :again
-? lines #c 5
+? lines #c 6
 < :textual!u@h JOIN #c
 > MODE #c
 ? joined #c
@@ -32,5 +35,6 @@
 < :textual!u@h PART #c :done
 ? line #c textual (u@h) left the channel (done)
 ? parted #c
+? rejoin #c no
 ? members #c =
 ? registered textual

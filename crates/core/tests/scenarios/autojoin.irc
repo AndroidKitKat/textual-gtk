@@ -1,0 +1,52 @@
+# Configured channels are in the sidebar before anything connects. After 001
+# they are joined in two lines, unkeyed and then keyed, with the keys in the
+# order of their channels. A channel the server refuses stays parted and
+# waiting (Textual only uses its join-error flag to skip a KICK rejoin), so
+# the next link tries it again; the server's own spelling of a name finds
+# the configured channel's buffer.
+= autojoin #A #B #c:key1 #d:key2
+! connect
+> dial #1 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+? buffers = console #A #B #c #d
+? parted #A
+? rejoin #A on-connect
+? rejoin #d on-connect
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+> JOIN #A,#B
+> JOIN #c,#d key1,key2
+? registered textual
+? parted #A
+< :textual!u@h JOIN #a
+> MODE #a
+? joined #A
+? buffers = console #A #B #c #d
+< :irc.test 474 textual #B :Cannot join channel (+b)
+? line console Message(474): #B Cannot join channel (+b)
+? parted #B
+? rejoin #B on-connect
+< :textual!u@h JOIN #c
+> MODE #c
+< :textual!u@h JOIN #d
+> MODE #d
+? joined #d
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 5 s
+? rejoin #A on-connect
+? rejoin #B on-connect
+? rejoin #d on-connect
+@ wake
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+> JOIN #A,#B
+> JOIN #c,#d key1,key2
+? registered textual

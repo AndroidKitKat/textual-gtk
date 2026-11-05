@@ -1,0 +1,27 @@
+# A KICK of ourselves says it will rejoin, and sends one JOIN three seconds
+# later with the configured key. A second wake does not send it again, and
+# the server's JOIN ends the wait. (Textual's joinKickedChannel; its
+# "rejoin on local kick" preference is off by default there.)
+= autojoin #c:sekrit
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+< :op!o@h KICK #c textual :bye
+? line-before #c op kicked textual from the channel (bye)
+? line #c Attempting to rejoin channel in three seconds
+? parted #c
+? rejoin #c 3s
+? next-wake 3s
+@ +2.999s
+? rejoin #c 0.001s
+@ +1ms
+> JOIN #c sekrit
+? rejoin #c on-connect
+? next-wake 267s
+@ +10s
+? lines #c 3
+< :textual!u@h JOIN #c
+> MODE #c
+? joined #c
+? next-wake 270s
+? registered textual

@@ -11,7 +11,7 @@ fn every_scenario_transcript_passes() {
         .filter(|p| p.extension().is_some_and(|e| e == "irc"))
         .collect();
     paths.sort();
-    assert!(paths.len() >= 47, "scenarios went missing: {paths:?}");
+    assert!(paths.len() >= 54, "scenarios went missing: {paths:?}");
 
     let mut failures = String::new();
     for path in &paths {
@@ -82,7 +82,12 @@ fn the_view_check_fails_when_a_change_is_missing() {
         std::fs::read_to_string(path).expect("readable scenario")
     };
     type Hide = fn(&Change) -> bool;
-    let cases: [(&str, Hide, &str); 4] = [
+    let cases: [(&str, Hide, &str); 5] = [
+        (
+            "lifecycle-online.irc",
+            |c| matches!(c, Change::Link(_)),
+            "link",
+        ),
         (
             "counters-focus.irc",
             |c| matches!(c, Change::Counters(_)),

@@ -9,13 +9,15 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::irc::casemap::CaseMapping;
 use crate::irc::isupport::Isupport;
+use crate::irc::join::join_lines;
 use crate::irc::{Message, WireLine};
 use crate::line::{Destination, Line, LineType};
-use crate::model::buffer::{Body, BufferId, Buffers};
+use crate::model::buffer::{Body, BufferId, Buffers, Rejoin};
 use crate::model::registration::{self, Failure, Progress, Registration, Setup, SetupError};
 use crate::model::session::Session;
-use crate::model::{Change, Cx};
+use crate::model::{Change, Cx, Ids};
 
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(240);
 /// Textual's `_pingInterval` and `_timeoutInterval`: silence for this long
@@ -100,7 +102,8 @@ pub struct ServerConfig {
     pub tls: Tls,
     pub auto_reconnect: bool,
     pub setup: Setup,
-    /// Joined after 001, keyed and unkeyed JOINs on separate lines.
+    /// Shown in the sidebar while offline and joined after 001, keyed and
+    /// unkeyed JOINs on separate lines.
     pub autojoin: Vec<ChannelConfig>,
     /// Normally `caps::WANTED`; `sasl` is added for `Auth::SaslPlain`.
     pub wanted_caps: Vec<String>,
@@ -332,9 +335,21 @@ pub struct Network {
 }
 
 impl Network {
-    pub(crate) fn new(config: ServerConfig, console: BufferId) -> Self {
+    /// Creates the console and a parted buffer for each configured autojoin
+    /// channel, announcing them in `changes`.
+    pub(crate) fn new(config: ServerConfig, ids: &mut Ids, changes: &mut Vec<Change>) -> Self {
         assert!(!config.addresses.is_empty(), "a server needs an address");
-        let buffers = Buffers::new(console, &config.addresses[0].host);
+        let console = ids.buffer();
+        let mut buffers = Buffers::new(console, &config.addresses[0].host);
+        changes.push(Change::BufferAdded(console));
+        for channel in &config.autojoin {
+            if buffers
+                .find_channel(CaseMapping::default(), &channel.name)
+                .is_none()
+            {
+                buffers.add_channel(ids.buffer(), &channel.name, Rejoin::OnConnect, changes);
+            }
+        }
         Network {
             config,
             desired: Desired::Offline,
@@ -383,6 +398,13 @@ impl Network {
 
     /// When `update` next needs `Input::Wake`, if ever.
     pub fn next_wake(&self) -> Option<Instant> {
+        [self.link_deadline(), self.buffers.next_rejoin()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    fn link_deadline(&self) -> Option<Instant> {
         match &self.link {
             Link::Offline { .. } => None,
             Link::Waiting { until, .. } | Link::Quitting { until, .. } => Some(*until),
@@ -394,6 +416,7 @@ impl Network {
     }
 
     pub(crate) fn update(&mut self, input: Input, cx: &mut Cx, out: &mut Out) {
+        let before = std::mem::discriminant(&self.link);
         self.expire(cx, out);
         match input {
             Input::Connect => self.connect(cx, out),
@@ -402,6 +425,10 @@ impl Network {
                 self.on_transport(event, cx, out);
             }
             Input::Transport { .. } | Input::Wake => {}
+        }
+        // Announced here, once, so no transition can forget it.
+        if std::mem::discriminant(&self.link) != before {
+            out.changes.push(Change::Link(self.config.id));
         }
     }
 
@@ -485,9 +512,14 @@ impl Network {
     }
 
     fn expire(&mut self, cx: &mut Cx, out: &mut Out) {
-        if self.next_wake().is_none_or(|at| cx.now.mono < at) {
-            return;
+        if self.link_deadline().is_some_and(|at| cx.now.mono >= at) {
+            self.expire_link(cx, out);
         }
+        let due = self.buffers.take_due_rejoins(cx.now.mono);
+        self.send_joins(&due, out);
+    }
+
+    fn expire_link(&mut self, cx: &mut Cx, out: &mut Out) {
         match &mut self.link {
             Link::Waiting { .. } => self.dial(cx, out),
             Link::Connecting { conn, .. } => {
@@ -617,6 +649,7 @@ impl Network {
                         pinged: false,
                     },
                 };
+                self.join_waiting(out);
             }
             Progress::Failed(failure) => {
                 out.effects.push(Effect::Hangup { conn });
@@ -627,6 +660,54 @@ impl Network {
                 self.end(why, cx, out);
             }
         }
+    }
+
+    /// After 001: the channels that were open when the last link ended, and
+    /// the configured ones even if the user left them.
+    fn join_waiting(&self, out: &mut Out) {
+        let casemap = self
+            .session()
+            .map_or_else(CaseMapping::default, Session::casemap);
+        let waiting: Vec<BufferId> = self
+            .buffers
+            .iter()
+            .filter(|b| match b.rejoin() {
+                Some(Rejoin::OnConnect) => true,
+                Some(Rejoin::No) => self.configured(casemap, b.name()).is_some(),
+                Some(Rejoin::At(_)) | None => false,
+            })
+            .map(|b| b.id())
+            .collect();
+        self.send_joins(&waiting, out);
+    }
+
+    fn configured(&self, casemap: CaseMapping, name: &str) -> Option<&ChannelConfig> {
+        let key = casemap.chan(name);
+        self.config
+            .autojoin
+            .iter()
+            .find(|c| casemap.chan(&c.name) == key)
+    }
+
+    /// Sends the JOINs for these channels, each with its configured key.
+    fn send_joins(&self, channels: &[BufferId], out: &mut Out) {
+        let Link::Online { conn, session, .. } = &self.link else {
+            return;
+        };
+        let casemap = session.casemap();
+        let entries: Vec<(&str, Option<&str>)> = channels
+            .iter()
+            .filter_map(|id| self.buffers.get(*id))
+            .map(|b| {
+                let key = self.configured(casemap, b.name());
+                (b.name(), key.and_then(|c| c.key.as_deref()))
+            })
+            .collect();
+        out.effects.extend(
+            join_lines(&entries)
+                .into_iter()
+                .map(|line| Effect::Send { conn: *conn, line }),
+        );
     }
 
     fn push_output(&mut self, conn: ConnId, reg: registration::Output, cx: &mut Cx, out: &mut Out) {

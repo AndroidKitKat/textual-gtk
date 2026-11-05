@@ -1,0 +1,26 @@
+# A kick followed by a link drop before the three seconds are up sends no
+# JOIN of its own: the channel waits for the next 001, which joins it once.
+# After the drop, only the retry timer is left.
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+< :op!o@h KICK #c textual :bye
+? rejoin #c 3s
+@ +1s
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 5 s
+? rejoin #c on-connect
+? next-wake 4.965s
+! connect
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+> JOIN #c
+@ +5s
+? parted #c
+? rejoin #c on-connect
+? registered textual

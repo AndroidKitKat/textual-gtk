@@ -1,0 +1,45 @@
+# A channel the server opened for us (not configured) is joined again at the
+# next 001 after the link drops and reconnects. A channel we left is not,
+# unless it is configured: Textual's autojoin takes every configured channel
+# that is inactive.
+= autojoin #conf
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+> JOIN #conf
+< :textual!u@h JOIN #conf
+> MODE #conf
+< :textual!u@h JOIN #other
+> MODE #other
+< :textual!u@h JOIN #left
+> MODE #left
+< :textual!u@h PART #conf :brb
+< :textual!u@h PART #left :bye
+? rejoin #conf no
+? rejoin #left no
+? joined #other
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 5 s
+? parted #other
+? rejoin #other on-connect
+? rejoin #conf no
+? rejoin #left no
+@ wake
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+> JOIN #conf,#other
+? registered textual
+< :textual!u@h JOIN #conf
+> MODE #conf
+< :textual!u@h JOIN #other
+> MODE #other
+? buffers = console #conf #other #left
+? joined #other
+? rejoin #left no
+? registered textual

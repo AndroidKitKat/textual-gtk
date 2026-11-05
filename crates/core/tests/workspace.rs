@@ -5,9 +5,10 @@ use std::time::Instant;
 use chrono::{Local, TimeZone};
 use textual_core::irc::Message;
 use textual_core::irc::caps::WANTED;
-use textual_core::model::buffer::BufferId;
+use textual_core::model::buffer::{BufferId, Rejoin};
 use textual_core::model::network::{
-    Address, ConnId, Effect, Input as NetInput, ServerConfig, ServerId, Tls, TransportEvent,
+    Address, ChannelConfig, ConnId, Effect, Input as NetInput, ServerConfig, ServerId, Tls,
+    TransportEvent,
 };
 use textual_core::model::workspace::{Input, Out, UiAction, Workspace};
 use textual_core::model::{Change, Now};
@@ -189,4 +190,35 @@ fn line_ids_and_times_come_from_the_workspace() {
     let first = run();
     assert_eq!(first, run(), "two runs print equal lines");
     assert_eq!(first[0].1, Local.timestamp_opt(1_800_000_000, 0).unwrap());
+}
+
+#[test]
+fn configured_channels_are_parted_buffers_from_the_start() {
+    let mut h = Harness::new();
+    let mut cfg = config(1, "a.test");
+    let channel = |name: &str| ChannelConfig {
+        name: name.to_owned(),
+        key: None,
+    };
+    // The same channel twice, spelled differently, is one buffer.
+    cfg.autojoin = vec![channel("#a"), channel("#B"), channel("#A")];
+    let mut out = Out::default();
+    h.ws.add_network(cfg, &mut out);
+    let net = h.ws.network(ServerId(1)).unwrap();
+    let ids: Vec<BufferId> = net.buffers().iter().map(|b| b.id()).collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(
+        out.changes,
+        [
+            Change::BufferAdded(ids[0]),
+            Change::BufferAdded(ids[1]),
+            Change::BufferAdded(ids[2]),
+            Change::Focus(ids[0]),
+        ]
+    );
+    for b in net.buffers().iter().skip(1) {
+        assert_eq!(b.rejoin(), Some(Rejoin::OnConnect));
+        assert!(b.joined().is_none());
+    }
+    assert_eq!(net.next_wake(), None, "offline: nothing to wake for");
 }

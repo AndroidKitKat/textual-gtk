@@ -73,9 +73,9 @@ impl Workspace {
     /// console takes the focus.
     pub fn add_network(&mut self, config: ServerConfig, out: &mut Out) {
         assert!(self.network(config.id).is_none(), "server ids are unique");
-        let console = self.ids.buffer();
-        self.networks.push(Network::new(config, console));
-        out.changes.push(Change::BufferAdded(console));
+        let network = Network::new(config, &mut self.ids, &mut out.changes);
+        let console = network.buffers().console().id();
+        self.networks.push(network);
         if self.focus.is_none() {
             self.focus = Some(console);
             out.changes.push(Change::Focus(console));

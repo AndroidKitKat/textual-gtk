@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
+use std::mem::Discriminant;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,7 @@ use textual_core::irc::Message;
 use textual_core::irc::caps::WANTED;
 use textual_core::irc::casemap::CaseMapping;
 use textual_core::line::{CLIENT_COMMAND, Line};
-use textual_core::model::buffer::{Buffer, BufferId, Counters};
+use textual_core::model::buffer::{Buffer, BufferId, Counters, Rejoin};
 use textual_core::model::members::{MemberDiff, MemberRow};
 use textual_core::model::network::{
     self, Address, CloseReason, ConnId, Effect, Ended, Link, Network, ServerConfig, ServerId, Tls,
@@ -178,6 +179,7 @@ struct Snapshot {
     buffers: HashMap<BufferId, Facts>,
     focus: Option<BufferId>,
     expanded: HashMap<ServerId, bool>,
+    links: HashMap<ServerId, Discriminant<Link>>,
 }
 
 #[derive(PartialEq)]
@@ -212,10 +214,16 @@ impl Snapshot {
             .iter()
             .map(|n| (n.id(), ws.is_expanded(n.id())))
             .collect();
+        let links = ws
+            .networks()
+            .iter()
+            .map(|n| (n.id(), std::mem::discriminant(n.link())))
+            .collect();
         Snapshot {
             buffers,
             focus: ws.focus(),
             expanded,
+            links,
         }
     }
 
@@ -236,6 +244,12 @@ impl Snapshot {
                 missing.push(format!(
                     "{server:?} expanded changed without Change::Expanded"
                 ));
+            }
+        }
+        for (server, link) in &self.links {
+            let was = before.links.get(server);
+            if was.is_some_and(|w| w != link) && !has(&Change::Link(*server)) {
+                missing.push(format!("{server:?} link changed without Change::Link"));
             }
         }
         for (id, now) in &self.buffers {
@@ -410,17 +424,20 @@ impl View {
 ///   `? casemap ascii|rfc1459|rfc1459-strict`, `? network name`.
 /// - Buffer queries: `? buffers = console #a alice` (sidebar order),
 ///   `? members #c = ~q @op +voice plain` (`(away)` after an away member),
-///   `? joined #c`, `? parted #c`, `? topic #c text|none`, `? modes #c +nt`,
+///   `? joined #c`, `? parted #c`, `? rejoin #c no|on-connect|<duration>`
+///   (a parted channel; the duration is the wait before a kicked channel is
+///   joined again), `? topic #c text|none`, `? modes #c +nt`,
 ///   `? line <buffer> text` (the last line's plain text; a final `*`
-///   matches a prefix), `? lines <buffer> n`, `? unread <buffer> n
+///   matches a prefix; `line-before` is the one before it), `? lines <buffer> n`, `? unread <buffer> n
 ///   highlights m`, `? focus <buffer>`, `? expanded yes|no`.
 /// - Without a `!` or `@` before the first `>` or `<`, the script starts
 ///   already connected: the connect, its notice and dial, and `opened` run
 ///   unchecked.
 /// - After every step, a view built only from the changes must match the
 ///   workspace: buffers, member lists and lines. Any change to a buffer's
-///   counters, name, joined state, topic or modes, to the focus or to a
-///   server's expansion must come with its `Change`.
+///   counters, name, joined state, topic or modes, to the focus, to a
+///   server's expansion or to the link's variant must come with its
+///   `Change`.
 /// - `#` at the start of a line is a comment; blank lines are skipped.
 pub fn run_transcript(source: &str) -> Result<(), String> {
     run_transcript_hiding(source, |_| false)
@@ -819,6 +836,16 @@ fn check_buffer_query(t: &Driver, what: &str, arg: &str) -> Option<String> {
                 (joined != (what == "joined"))
                     .then(|| if joined { "joined" } else { "not joined" }.to_owned())
             }
+            "rejoin" => {
+                let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+                let got = match t.buffer(name)?.rejoin() {
+                    None => "not parted".to_owned(),
+                    Some(Rejoin::No) => "no".to_owned(),
+                    Some(Rejoin::OnConnect) => "on-connect".to_owned(),
+                    Some(Rejoin::At(at)) => show(at.saturating_duration_since(t.now)),
+                };
+                (got != want).then_some(got)
+            }
             "topic" => {
                 let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
                 let b = t.buffer(name)?;
@@ -831,10 +858,16 @@ fn check_buffer_query(t: &Driver, what: &str, arg: &str) -> Option<String> {
                 let got = b.joined().map(|j| j.modes()).unwrap_or_default();
                 (got != want).then_some(got)
             }
-            "line" => {
+            "line" | "line-before" => {
                 let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
                 let b = t.buffer(name)?;
-                let got = b.scrollback().last().map(|l| l.plain_text());
+                let back = usize::from(what == "line-before");
+                let got = b
+                    .scrollback()
+                    .lines()
+                    .rev()
+                    .nth(back)
+                    .map(|l| l.plain_text());
                 let holds = got
                     .as_deref()
                     .is_some_and(|g| match want.strip_suffix('*') {
