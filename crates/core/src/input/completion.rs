@@ -5,9 +5,16 @@
 
 use std::ops::Range;
 
-/// Names Textual offers after the members of a channel (`performCompletion_step1`).
+/// Names Textual offers after the members of a channel
+/// (`performCompletion_step1`), its own name last.
 const STATIC_NAMES: [&str; 7] = [
-    "NickServ", "RootServ", "OperServ", "HostServ", "ChanServ", "MemoServ", "Textual",
+    "NickServ",
+    "RootServ",
+    "OperServ",
+    "HostServ",
+    "ChanServ",
+    "MemoServ",
+    crate::APP_NAME,
 ];
 
 /// Characters trimmed off the front of a nick for its second spelling.
@@ -466,7 +473,7 @@ mod tests {
             "TT",
         );
         assert_eq!(got[1], "ChanServ |");
-        assert_eq!(one("Tex|", &[]), "Textual |");
+        assert_eq!(one("Tex|", &[]), "Textual GTK |");
         assert_eq!(one("ergo|", &[]), "ErgoTest |");
     }
 
