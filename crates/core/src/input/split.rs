@@ -42,7 +42,8 @@ pub fn budget(
 /// The messages `text` goes out as. Each fits `budget` bytes; a message
 /// after the first starts with the codes that reopen the formatting still
 /// active where the previous one ended. A cut never falls inside a UTF-8
-/// sequence, a formatting code or a character with its combining marks,
+/// sequence or a formatting code, nor inside a character with its
+/// combining marks unless that character alone is longer than a message,
 /// and prefers the last space within the final 25 bytes, which then
 /// starts the next message (as in Textual).
 pub fn split_for_wire(text: &str, budget: usize) -> Vec<String> {
@@ -87,8 +88,15 @@ fn pieces(text: &str, budget: usize) -> Vec<(String, &str)> {
 fn cut_point(rest: &str, room: usize) -> usize {
     let ends: Vec<usize> = token_ends(rest).take_while(|e| *e <= room).collect();
     let Some(&last) = ends.last() else {
-        // Not even one token fits: send it alone rather than stall.
-        return token_len(rest);
+        // A character with more marks than a message holds: cut inside it
+        // at the last character that fits, since a longer line would be
+        // refused (417) after we printed it. At least one character goes,
+        // so the cut always moves on.
+        let first = rest.chars().next().map_or(0, char::len_utf8);
+        return (first..=room)
+            .rev()
+            .find(|i| rest.is_char_boundary(*i))
+            .unwrap_or(first);
     };
     let window = last.saturating_sub(WRAP_DISTANCE);
     ends.iter()
@@ -361,6 +369,18 @@ mod tests {
         assert_eq!(body::strip(&parts[1]), ",5");
     }
 
+    #[test]
+    fn a_character_longer_than_a_message_is_cut_inside() {
+        let marks = format!("a{}", "\u{301}".repeat(400));
+        let zwj = vec!["👩"; 40].join("\u{200D}");
+        for text in [marks, zwj] {
+            let parts = split_for_wire(&text, 100);
+            assert!(parts.len() > 1);
+            assert!(parts.iter().all(|p| p.len() <= 100), "{parts:?}");
+            assert_eq!(parts.concat(), text);
+        }
+    }
+
     /// xorshift64, so every run sees the same texts.
     struct Rng(u64);
 
@@ -410,6 +430,10 @@ mod tests {
             "\x04112233,445566",
             "\x04zz",
             "日本語",
+            // Long clusters: marks and joined emoji that build one
+            // character longer than a message.
+            "\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}",
+            "\u{200D}👩",
         ];
         let len = rng.next() % 400;
         (0..len)
