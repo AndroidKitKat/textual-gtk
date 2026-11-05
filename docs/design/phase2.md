@@ -57,7 +57,7 @@ The tokio side owns bytes: dial, rustls, framing (the existing `LineReader`), an
 ### Lifecycle (candidate 1's `Link`, candidate 2's `Desired`, candidate 3's derived timers)
 
 ```
-Network { config, desired: Desired::{Online, Offline}, link: Link, buffers, ... }
+Network { config, desired: Desired::{Online, Offline}, link: Link, failures: u32, buffers, ... }
 Link = Offline { last: Option<Ended> }
      | Waiting { until, attempt, last }
      | Connecting { conn: ConnId, attempt, address }
@@ -70,14 +70,14 @@ Link = Offline { last: Option<Ended> }
 - `Desired` is separate from `Link`: "offline because the user said so" and "offline and retrying" are different states.
 - Every transport event carries `ConnId`; an event from another conn is dropped. `Hangup` of a stale conn is a no-op.
 - Timers are derived: `Network::next_wake()` is the minimum of the variant's deadline (retry due, 240 s watchdog, 270 s idle PING, 360 s idle close, quit grace) and a `later` queue (kick rejoin, NickServ wait). The loop sleeps until `Workspace::next_wake()`. Nothing is scheduled or cancelled.
-- Backoff: 5 s doubling to a 300 s cap with jitter derived from (server id, attempt), so tests are deterministic. The attempt counter resets after 60 s online. No retry after a user quit, a bad certificate, a ban, ERROR "Excess Flood"/"SendQ", or `auto_reconnect = false`. Addresses rotate round-robin. `gio::NetworkMonitor` regaining the network skips a pending wait.
+- Backoff: 5 s doubling to a 300 s cap with jitter derived from (server id, failures), so tests are deterministic. `failures` lives on `Network`, not in `Link`, because it has to survive the live variants: it goes up when a link ends and resets only once a link has stayed `Online` for 60 s, so a server that accepts and drops us still backs off. No retry after a user quit, a bad certificate, a ban, ERROR "Excess Flood"/"SendQ", or `auto_reconnect = false`. Addresses rotate round-robin. `gio::NetworkMonitor` regaining the network skips a pending wait.
 
 ### Registration (candidate 1's protocol, candidate 2's step functions)
 
 - `Caps::on_cap` is a pure step function, also used for `CAP NEW`/`DEL` after registration. It collects every `LS *` chunk, then packs `CAP REQ` lines to the byte budget. A NAK of a batch re-requests its caps one by one.
 - `SaslState` step function: PLAIN (authzid = authcid = `username`, Textual's rule), EXTERNAL later. A 908 with another usable mechanism gets one retry. Failure continues with `CAP END` and prints why.
 - `Auth` is explicit in config (`None`, `SaslPlain`, `NickServ`, later `SaslExternal`) instead of Textual's inference from a NickServ password.
-- 433/432/437 before 001: alternate nicks, then `_` padding to NICKLEN, then `NoUsableNick`.
+- 433/432/437 before 001: alternate nicks, then `_` padding, then `NoUsableNick`. NICKLEN is not known yet (005 follows 001; measured on Ergo), so padding stops at 9 characters, the RFC 1459 default, or at the longest nick the server has already accepted. With `CAP LS 302` pending, servers hold the 433 until `CAP END`, so the ladder runs after the SASL step.
 - After 001: on-connect commands, NickServ IDENTIFY for `Auth::NickServ`, then autojoin: configured autojoin channels plus the channels joined when the link dropped. Keyed and unkeyed JOINs on separate lines, under the byte budget.
 
 ### Identity (candidate 2's types)
@@ -90,11 +90,11 @@ Link = Offline { last: Option<Ended> }
 
 ### Print funnel (candidate 3)
 
-One function resolves a destination: a joined channel, a query created on demand for an incoming PM (our own echoed PRIVMSG goes to the target's query), or the console for server notices and numerics. A public message for a channel we are not in is dropped. QUIT and NICK print into every buffer the nick is in, computed before the state change. Highlight is decided here (own nick now, keyword lists in phase 3), the line goes into the buffer's `Scrollback` (`Rc<Line>`, model-owned, last N), counters bump (`nothing for the console; nothing if focused and the window is active`), and `Change::Line` then `Change::Counters` are emitted. With echo-message acked, own text is not printed locally.
+One function resolves a destination. It first strips STATUSMSG symbols with `Isupport::split_statusmsg` (an echoed `PRIVMSG @#chan` belongs to `#chan`, not to a query named `@#chan`). Then: a joined channel, a query created on demand for an incoming PM (our own echoed PRIVMSG goes to the target's query), or the console for server notices and numerics. A public message for a channel we are not in is dropped. QUIT and NICK print into every buffer the nick is in, computed before the state change. Highlight is decided here (own nick now, keyword lists in phase 3), the line goes into the buffer's `Scrollback` (`Rc<Line>`, model-owned, last N), counters bump (`nothing for the console; nothing if focused and the window is active`), and `Change::Line` then `Change::Counters` are emitted. With echo-message acked, own text is not printed locally. A line whose `msgid` tag equals one already in the buffer's scrollback is dropped, which covers the server delivering a message to our own nick twice (once as the echo, once as the delivery; measured on Ergo). `Line` takes its time and id from the caller (`Session` passes `now` and the next id from a per-workspace counter), so the core never reads the wall clock and two runs of one script produce equal scrollback.
 
 ### Changes and the view (candidate 3's pull model, candidate 1's GObject rows)
 
-`Change` carries ids, plus the payloads that cannot be pulled afterwards (`Line`, `MemberDiff`). The view pulls everything else from `&Workspace`. Widget commands (set input text, ask for confirmation) are `Effect::Ui`, not `Change`, so `Change` stays model facts.
+`Change` carries ids, plus the payloads that cannot be pulled afterwards (`Line`, `MemberDiff`). The view pulls everything else from `&Workspace`. Because the view applies a whole pass against the final workspace, a buffer that is rebuilt from state in a pass (its member list reset on `Change::Focus`, or its chat view created and filled from `Scrollback`) ignores that pass's `Line` and `MemberDiff` payloads for it: the final state already contains them. Applying both duplicated members and lines in a model of these rules. Widget commands (set input text, ask for confirmation) are `Effect::Ui`, not `Change`, so `Change` stays model facts.
 
 - Sidebar: `gtk::ListView` over `gtk::TreeListModel`; root `gio::ListStore` of `ServerRow`, each with a child `ListStore` of `BufferRow`. Rows are small GObject subclasses with properties (label, kind, state, unread, highlights) updated in place, never replaced, so expansion and selection survive. The view keeps `HashMap<BufferId, BufferRow>` for lookup.
 - Selection: `gtk::SingleSelection` sends `UiAction::Select`; model-initiated focus moves come back as `Change::Focus` and the view calls `set_selected` (selecting the selected row emits nothing).
@@ -106,7 +106,7 @@ One function resolves a destination: a joined channel, a query created on demand
 ### Input (all pure, in `crates/core/src/input`)
 
 - One `COMMANDS` table feeds dispatch and completion. Phase-2 set: `join part msg query me notice nick quit topic mode kick invite whois away close connect disconnect reconnect raw quote`. Unknown commands go out raw, uppercased. Console lines are commands with or without `/`; elsewhere `//x` sends `/x`, a lone `/` is text.
-- `split_for_wire(text, budget)`: budget from the real hostmask once known, else the maximum; ACTION subtracts 9; never inside a UTF-8 sequence or a colour code; prefers a space in the last 25 bytes; reopens active formatting on the next chunk. Property test: chunks join back to the input and each fits.
+- `split_for_wire(text, budget)`: budget = 512 − len(`:nick!user@host CMD target :`) − 2, with the real hostmask once known, else the maximum; ACTION subtracts 9 more; never inside a UTF-8 sequence or a colour code; prefers a space in the last 25 bytes; reopens active formatting at the start of the next chunk, and those reopening bytes count against that chunk's budget (Ergo rejects an over-budget line with 417 rather than truncating it, so the text would be lost). Property tests: every chunk fits the budget, and the chunks with their inserted reopening codes removed join back to the input.
 - More than 4 lines or 4×510 bytes asks first (`Effect::Ui(Confirm::Flood)`), then the view re-sends with `confirmed: true`.
 - `History`: per buffer (global as an option), 100 entries, consecutive duplicates skipped, the draft held in a separate stash rather than pushed into history (a deliberate difference from Textual).
 - `Completion`: Textual's algorithm as documented in `docs/research/phase2-window-and-input.md`, fed by `Session::completion_source(buffer)`.
@@ -148,6 +148,10 @@ Rejected: candidate 2's counters in GTK rows and `Rc<RefCell>` dispatch (split o
 ## Alternatives considered
 
 Per the candidates: protocol state in a tokio actor with a UI mirror (two copies of truth); a GObject-native model (untestable without GLib, two indexes); `Arc<Mutex<World>>` (locks, half-applied reads); state diffing (O(members) per line); GSettings for servers (nested lists, installed schema needed to run). All lost on interface depth or single ownership; see each candidate's section.
+
+## Interrogation
+
+Two adversaries probed this design before implementation (`docs/design/phase2-candidates/` has the brief). Corrections folded in above, each reproduced by rerunning the adversary's probe: the attempt counter lives on `Network`; pre-001 nick padding cannot use NICKLEN; a rebuilt buffer ignores that pass's payloads; `Line` takes time and id from the caller. Folded in from the text alone (the probes against Ergo were throttled on rerun): the split budget counts reopening codes; STATUSMSG is stripped before routing and echoes are deduplicated by `msgid`.
 
 ## Implementation reconciliation
 

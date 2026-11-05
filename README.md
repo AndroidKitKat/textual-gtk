@@ -16,7 +16,7 @@ Options: `--server host:port`, `--nick`, `--channel`, `--style` (a folder name u
 
 ```sh
 scripts/check.sh            # fmt, clippy, unit and integration tests
-docker run -d --name textual-ergo -p 127.0.0.1:6667:6667 ghcr.io/ergochat/ergo:stable
+scripts/test-server.sh      # local Ergo on 127.0.0.1:6667/6697, limits lifted for tests
 cargo test --test connection -- --ignored   # two clients through the real server
 python3 scripts/e2e.py      # the app under Xvfb shows a live message
 ```
