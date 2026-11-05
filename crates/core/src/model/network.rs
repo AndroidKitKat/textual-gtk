@@ -868,25 +868,27 @@ impl Network {
             speech == Speech::Action,
         );
         for part in split_for_wire(text, room) {
+            let body = match speech {
+                Speech::Action => format!("\x01ACTION {part}\x01"),
+                _ => part.clone(),
+            };
+            let wire = match Message::new(command, &[target, &body]).to_wire() {
+                Ok(wire) => wire,
+                Err(e) => {
+                    let console = self.buffers.console().id();
+                    self.print_client(console, &format!("Not sent: {e}"), cx, out);
+                    continue;
+                }
+            };
             if !echoed && let Some(buffer) = echo {
-                let mut line = Line::new(cx.stamp(), kind, command, Some(&nick), part.clone());
+                let mut line = Line::new(cx.stamp(), kind, command, Some(&nick), part);
                 line.from_self = true;
                 let now = cx.now.mono;
                 self.buffers
                     .converse(buffer, &line, &nick, casemap, false, now);
                 self.buffers.print(buffer, line, &mut out.changes);
             }
-            let body = match speech {
-                Speech::Action => format!("\x01ACTION {part}\x01"),
-                _ => part,
-            };
-            match Message::new(command, &[target, &body]).to_wire() {
-                Ok(line) => self.send_line(line, cx, out),
-                Err(e) => {
-                    let console = self.buffers.console().id();
-                    self.print_client(console, &format!("Not sent: {e}"), cx, out);
-                }
-            }
+            self.send_line(wire, cx, out);
         }
     }
 

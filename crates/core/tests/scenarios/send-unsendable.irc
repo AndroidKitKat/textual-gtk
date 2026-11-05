@@ -1,0 +1,12 @@
+# A part that cannot go on the wire (here a NUL) is not printed as sent:
+# the console says why and the channel shows nothing new.
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+! type #c fine
+> PRIVMSG #c fine
+? line #c <textual> fine
+! type #c bad\x00line
+? notice Not sent: contains CR, LF or NUL
+? line #c <textual> fine
+? registered textual
