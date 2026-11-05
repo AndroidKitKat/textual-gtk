@@ -61,6 +61,16 @@ Written 2026-11-05 from the conversation in which Michael proposed the project.
 3. **Parity.** Preferences, highlights, notifications, logging and history search, inline media, DCC, and the remaining dialogs (server properties, channel properties, moderation and so on).
 4. **Extensibility.** Plugin API, user scripts, custom user styles, and porting the useful plugins.
 
+## Status
+
+- **Phase 1: done (2026-11-05).** `scripts/e2e.py` runs the app under Xvfb against the local Ergo. A second client's message shows in the app's WebKitGTK page through Simplified's real templates, CSS and JS, with the topic bar set. Pieces:
+  - `src/irc`: IRCv3 line parser (ircdocs vectors) and a tokio connection task (registration, PING, autojoin, quit).
+  - `src/style`: style loading, the template engine, and IRC formatting to HTML.
+  - `src/line.rs`: messages to Textual log lines (wording, nick colours, timestamps).
+  - `src/ui/chat_view.rs`: the WebKit view and Textual's JS handshake.
+- **Deferred from phase 1 to phase 2:** outgoing line length limits and splitting, PING idle timeout, registration failures other than 433, NAMES/member tracking (QUIT and NICK lines currently show in the one channel regardless), links, channel and nick tagging in bodies.
+- **Next:** phase 2. Start with an architect pass on the client model (servers, channels, members, views), since that is the one-way door.
+
 ## Open decisions (Michael)
 
 - **Name.** "textual-gtk" is a working name. "Textual" belongs to the upstream project.
