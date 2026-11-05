@@ -11,7 +11,7 @@ fn every_scenario_transcript_passes() {
         .filter(|p| p.extension().is_some_and(|e| e == "irc"))
         .collect();
     paths.sort();
-    assert!(paths.len() >= 46, "scenarios went missing: {paths:?}");
+    assert!(paths.len() >= 47, "scenarios went missing: {paths:?}");
 
     let mut failures = String::new();
     for path in &paths {
@@ -70,4 +70,46 @@ fn a_scenario_without_an_end_state_fails() {
     assert!(errors.contains("end: no end state"), "{errors}");
     let registering = "> CAP LS 302\n> NICK textual\n> USER textual 0 * Textual\n? registering\n";
     assert_eq!(support::run_transcript(registering), Ok(()));
+}
+
+#[test]
+fn the_view_check_fails_when_a_change_is_missing() {
+    use textual_core::model::Change;
+    let read = |name: &str| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/scenarios")
+            .join(name);
+        std::fs::read_to_string(path).expect("readable scenario")
+    };
+    type Hide = fn(&Change) -> bool;
+    let cases: [(&str, Hide, &str); 4] = [
+        (
+            "counters-focus.irc",
+            |c| matches!(c, Change::Counters(_)),
+            "counters",
+        ),
+        (
+            "counters-focus.irc",
+            |c| matches!(c, Change::Focus(_)),
+            "focus",
+        ),
+        (
+            "collapse-focus.irc",
+            |c| matches!(c, Change::Expanded(_)),
+            "expanded",
+        ),
+        (
+            "topic.irc",
+            |c| matches!(c, Change::BufferChanged(_)),
+            "topic",
+        ),
+    ];
+    for (name, hide, what) in cases {
+        let errors = support::run_transcript_hiding(&read(name), hide)
+            .expect_err(&format!("{name} passes with its {what} changes hidden"));
+        assert!(
+            errors.contains(&format!("{what} changed without")),
+            "{name}: {errors}"
+        );
+    }
 }

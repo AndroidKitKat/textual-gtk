@@ -211,6 +211,8 @@ impl Handler<'_, '_> {
                 .find_joined(casemap, &name)
                 .into_iter()
                 .collect(),
+            // A message from or to an empty nick has no query to go in.
+            Destination::Query(nick) if nick.is_empty() => Vec::new(),
             Destination::Query(nick) => vec![self.query(&nick, line.kind != LineType::Notice)],
             Destination::Nick(nick) => self.buffers_of(&nick),
             Destination::Server => vec![self.buffers.console().id()],
@@ -467,8 +469,7 @@ impl Handler<'_, '_> {
         let isupport = &self.s.isupport;
         let entries: Vec<Member> = list
             .split(' ')
-            .filter(|t| !t.is_empty())
-            .map(|token| {
+            .filter_map(|token| {
                 let mut modes = ModeBits::default();
                 let mut rest = token;
                 while let Some(c) = rest.chars().next()
@@ -480,11 +481,14 @@ impl Handler<'_, '_> {
                     rest = &rest[c.len_utf8()..];
                 }
                 let source = Source::parse(rest);
+                if source.nick.is_empty() {
+                    return None;
+                }
                 let mut member = Member::new(source.nick);
                 member.modes = modes;
                 member.user = source.user.map(str::to_owned);
                 member.host = source.host.map(str::to_owned);
-                member
+                Some(member)
             })
             .collect();
         if let Some(joined) = self.buffers.joined_mut(id) {

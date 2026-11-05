@@ -1,0 +1,20 @@
+# Server text is data. A NAMES token that is only prefix symbols, or whose
+# nick is empty, adds no member; a private message from an empty nick
+# opens no query; an empty or valueless msgid is no msgid, so it does not
+# swallow the next message.
+! welcome message-tags
+< :irc.test 005 textual CHANTYPES=# PREFIX=(ov)@+ :are supported by this server
+< :textual!u@h JOIN #c
+> MODE #c
+< :irc.test 353 textual = #c :@ + @+ !u@h @!u@h alice textual
+< :irc.test 366 textual #c :End of NAMES list
+> WHO #c
+? members #c = alice textual
+< :!u@h PRIVMSG textual :from nobody
+? buffers = console #c
+< @msgid= :bob!b@h PRIVMSG #c :one
+< @msgid= :bob!b@h PRIVMSG #c :two
+< @msgid :bob!b@h PRIVMSG #c :three
+? lines #c 4
+? line #c <bob> three
+? registered textual

@@ -219,8 +219,10 @@ impl Workspace {
             return;
         };
         // Focusing a buffer under a collapsed server expands it first, so
-        // the sidebar can show the selection.
-        if self.collapsed.remove(&server) {
+        // the sidebar can show the selection. The console is the server
+        // row, which a collapse leaves visible.
+        let console = self.buffer(id).is_some_and(|(_, b)| b.is_console());
+        if !console && self.collapsed.remove(&server) {
             out.changes.push(Change::Expanded(server));
         }
         self.focus = Some(id);

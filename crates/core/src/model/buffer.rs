@@ -6,7 +6,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::irc::casemap::CaseMapping;
-use crate::line::Line;
+use crate::line::{Line, LineType};
 use crate::model::Change;
 use crate::model::members::{Member, MemberDiff, Members};
 
@@ -195,10 +195,12 @@ impl Buffer {
     }
 
     /// Counts a line printed where the user is not looking, as Textual
-    /// does: only what someone else said, and never in the console.
-    /// Returns whether the counters changed.
+    /// does: only what someone else said, never in the console, and a
+    /// channel NOTICE not at all (`IRCClient _receiveText_Public` only
+    /// notifies for one). Returns whether the counters changed.
     pub(crate) fn count(&mut self, line: &Line) -> bool {
-        if self.is_console() || !line.kind.is_spoken() || line.from_self {
+        let channel_notice = matches!(self.body, Body::Channel(_)) && line.kind == LineType::Notice;
+        if self.is_console() || !line.kind.is_spoken() || line.from_self || channel_notice {
             return false;
         }
         self.counters.unread += 1;

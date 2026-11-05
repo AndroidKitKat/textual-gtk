@@ -206,7 +206,10 @@ impl Line {
                 };
                 let speaker = (!nick.is_empty()).then_some(nick);
                 let mut line = Line::new(stamp, kind, &message.command, speaker, text.to_owned());
-                line.highlight = !mine && mentions(text, me, casemap);
+                // Textual scans only PRIVMSG and ACTION for keywords
+                // (`TVCLogRenderer scanForKeywords`).
+                line.highlight =
+                    kind != LineType::Notice && !mine && mentions(&body::strip(text), me, casemap);
                 (destination, line)
             }
             "JOIN" => (
@@ -314,7 +317,10 @@ impl Line {
             _ => return None,
         };
         line.from_self = mine;
-        line.msgid = message.tag("msgid").map(str::to_owned);
+        line.msgid = message
+            .tag("msgid")
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
         Some((destination, line))
     }
 
@@ -434,13 +440,16 @@ fn is_numeric(command: &str) -> bool {
     command.len() == 3 && command.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Whether `text` names `nick` as a whole word (Textual's exact match: no
-/// letter or digit on either side), with case folded by the server's
-/// casemap.
+/// Whether `text`, with formatting stripped, names `nick` the way
+/// Textual's exact highlight matching does (`TVCLogRenderer
+/// matchKeywordsUsingNormalMatching`): an end of the match that is a
+/// letter or digit must not touch another letter or digit, and a match
+/// inside a link does not count. Case is folded by the server's casemap.
 fn mentions(text: &str, nick: &str, casemap: CaseMapping) -> bool {
     if nick.is_empty() {
         return false;
     }
+    let links = body::links(text);
     // Folding maps ASCII to ASCII and leaves the rest, so byte offsets in
     // the folded text are offsets in the original.
     let text = casemap.nick(text);
@@ -448,8 +457,12 @@ fn mentions(text: &str, nick: &str, casemap: CaseMapping) -> bool {
     let nick = casemap.nick(nick);
     let nick = nick.as_str();
     let is_word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
-    text.match_indices(&nick).any(|(i, m)| {
-        !is_word(text[..i].chars().next_back()) && !is_word(text[i + m.len()..].chars().next())
+    text.match_indices(nick).any(|(i, m)| {
+        let end = i + m.len();
+        let (before, after) = (&text[..i], &text[end..]);
+        let left_ok = !is_word(m.chars().next()) || !is_word(before.chars().next_back());
+        let right_ok = !is_word(m.chars().next_back()) || !is_word(after.chars().next());
+        left_ok && right_ok && !links.iter().any(|l| l.start < end && i < l.end)
     })
 }
 
@@ -563,6 +576,51 @@ mod tests {
         assert!(mentions("ping NICK{}: there", "nick[]", rfc));
         assert!(!mentions("ping nick{}", "nick[]", CaseMapping::Ascii));
         assert!(mentions("é-nick", "nick", rfc), "punctuation is a boundary");
+    }
+
+    #[test]
+    fn mentions_follow_textual_normal_matching() {
+        let rfc = CaseMapping::Rfc1459;
+        assert!(mentions("foo_bar", "foo_", rfc), "the match ends in `_`");
+        assert!(mentions("x[y]z", "x[y]", rfc), "the match ends in `]`");
+        assert!(mentions("a[x]", "[x]", rfc), "the match starts with `[`");
+        assert!(!mentions("ax[y]", "x[y]", rfc), "`x` touches `a`");
+        assert!(!mentions("see http://example.com/me/page", "me", rfc));
+        assert!(!mentions("www.me.example", "me", rfc));
+        assert!(mentions("http://example.com/me/page me", "me", rfc));
+        assert!(mentions("(http://x.test) me", "me", rfc));
+    }
+
+    #[test]
+    fn only_messages_and_actions_highlight() {
+        let isupport = ergo();
+        let line = |raw: &str| {
+            Line::from_message(&Message::parse(raw).unwrap(), "me", &isupport, stamp())
+                .unwrap()
+                .1
+        };
+        assert!(line(":a!u@h PRIVMSG #c :\x0304me\x03 hi").highlight);
+        assert!(line(":a!u@h PRIVMSG #c :\x02m\x02e hi").highlight);
+        assert!(line(":a!u@h PRIVMSG #c :\x01ACTION pokes me\x01").highlight);
+        assert!(!line(":a!u@h NOTICE #c :me").highlight);
+        assert!(!line(":a!u@h NOTICE me :me").highlight);
+    }
+
+    #[test]
+    fn an_empty_msgid_is_no_msgid() {
+        let isupport = ergo();
+        let msgid = |raw: &str| {
+            Line::from_message(&Message::parse(raw).unwrap(), "me", &isupport, stamp())
+                .unwrap()
+                .1
+                .msgid
+        };
+        assert_eq!(msgid("@msgid= :a!u@h PRIVMSG #c :x"), None);
+        assert_eq!(msgid("@msgid :a!u@h PRIVMSG #c :x"), None);
+        assert_eq!(
+            msgid("@msgid=m1 :a!u@h PRIVMSG #c :x").as_deref(),
+            Some("m1")
+        );
     }
 
     #[test]

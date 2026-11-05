@@ -4,6 +4,7 @@
 //! done yet.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use super::template::Value;
 
@@ -178,13 +179,43 @@ fn escape_fragment(text: &str) -> String {
     out
 }
 
-/// Renders `body` to HTML. `spoilers` marks a run whose foreground and
-/// background match (Textual does this for PRIVMSG, ACTION and NOTICE).
 /// The body's text with every formatting code removed.
 pub fn strip(body: &str) -> String {
     parse_runs(body).into_iter().map(|run| run.text).collect()
 }
 
+/// Byte ranges of the links in `text`, which has no formatting codes. A
+/// link is `scheme://` or `www.` up to the next whitespace, a stand-in
+/// for Textual's `TLOLinkParser` until links are rendered.
+pub fn links(text: &str) -> Vec<Range<usize>> {
+    text.split(char::is_whitespace)
+        .filter_map(|token| {
+            let start = token.as_ptr() as usize - text.as_ptr() as usize;
+            let lower = token.to_ascii_lowercase();
+            let scheme = lower.find("://").and_then(|at| {
+                let letters = lower[..at]
+                    .bytes()
+                    .rev()
+                    .take_while(u8::is_ascii_alphabetic)
+                    .count();
+                (letters > 0).then_some(at - letters)
+            });
+            let www = || {
+                lower.match_indices("www.").map(|(at, _)| at).find(|&at| {
+                    !lower[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_alphanumeric)
+                })
+            };
+            let from = scheme.or_else(www)?;
+            Some(start + from..start + token.len())
+        })
+        .collect()
+}
+
+/// Renders `body` to HTML. `spoilers` marks a run whose foreground and
+/// background match (Textual does this for PRIVMSG, ACTION and NOTICE).
 pub fn render(body: &str, spoilers: bool, fragment: &dyn Fn(&Value) -> String) -> String {
     let runs = parse_runs(body);
     let mut out = String::new();

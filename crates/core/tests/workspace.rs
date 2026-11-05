@@ -154,6 +154,15 @@ fn two_servers_keep_their_own_buffers() {
     assert_eq!(out.changes, [Change::Expanded(a)]);
     assert_eq!(h.ws.focus(), Some(same_b));
 
+    // A collapsed server's console is its row, so selecting it leaves the
+    // server collapsed; selecting a buffer under it expands it.
+    let out = h.input(Input::Ui(UiAction::Select(console_a)));
+    assert_eq!(out.changes, [Change::Focus(console_a)]);
+    assert!(!h.ws.is_expanded(a));
+    let out = h.input(Input::Ui(UiAction::Select(same_a)));
+    assert_eq!(out.changes, [Change::Expanded(a), Change::Focus(same_a)]);
+    assert!(h.ws.is_expanded(a));
+
     // An event for a server that does not exist is ignored.
     let out = h.line(ServerId(9), conn_a, ":bob!b@h PRIVMSG #same :hi");
     assert!(out.changes.is_empty() && out.effects.is_empty());

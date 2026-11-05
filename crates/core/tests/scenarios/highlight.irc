@@ -1,7 +1,10 @@
-# A message that names us as a whole word, under the server's casemap, is a
-# highlight; one where our nick is part of a longer word is not, and our
-# own lines never are. Only what others say counts as unread: not events,
-# not our own echoes, never the console.
+# A message that names us, under the server's casemap, is a highlight
+# unless a letter or digit touches an end of the match that is itself a
+# letter or digit (Textual's normal matching): "tex[]s" highlights,
+# "xtex[]" does not. Our own lines never are. Only what others say counts as unread: not events,
+# not our own echoes, never the console. A channel NOTICE neither counts
+# nor highlights (Textual only notifies); a NOTICE in an open query counts
+# as unread but never highlights.
 = nick tex[]
 ! welcome echo-message
 < :tex[]!u@h JOIN #c
@@ -11,14 +14,16 @@
 ? unread #c 1 highlights 1
 < :bob!b@h PRIVMSG #c :tex[]s are cool
 < :bob!b@h PRIVMSG #c :xtex[] no
-? unread #c 3 highlights 1
+? unread #c 3 highlights 2
 < :bob!b@h NOTICE #c :(tex[]) notice
-? unread #c 4 highlights 2
+? unread #c 3 highlights 2
 < :tex[]!u@h PRIVMSG #c :tex[] talking to myself
 < :carol!c@h JOIN #c
-? unread #c 4 highlights 2
+? unread #c 3 highlights 2
 < :bob!b@h PRIVMSG tex[] :private, tex[]
 ? unread bob 1 highlights 1
+< :bob!b@h NOTICE tex[] :a notice for tex[]
+? unread bob 2 highlights 1
 < :irc.test NOTICE tex[] :tex[] from the server
 ? unread console 0 highlights 0
 ? registered tex[]

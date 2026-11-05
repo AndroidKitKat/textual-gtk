@@ -11,7 +11,7 @@ use textual_core::irc::Message;
 use textual_core::irc::caps::WANTED;
 use textual_core::irc::casemap::CaseMapping;
 use textual_core::line::{CLIENT_COMMAND, Line};
-use textual_core::model::buffer::{Buffer, BufferId};
+use textual_core::model::buffer::{Buffer, BufferId, Counters};
 use textual_core::model::members::{MemberDiff, MemberRow};
 use textual_core::model::network::{
     self, Address, CloseReason, ConnId, Effect, Ended, Link, Network, ServerConfig, ServerId, Tls,
@@ -35,10 +35,12 @@ pub struct Driver {
     view: View,
     /// Where the view built from changes disagreed with the workspace.
     drift: Vec<String>,
+    /// Changes withheld from the view, to prove its checks can fail.
+    hide: fn(&Change) -> bool,
 }
 
 impl Driver {
-    pub fn new(config: ServerConfig) -> Self {
+    pub fn new(config: ServerConfig, hide: fn(&Change) -> bool) -> Self {
         let server = config.id;
         let start = Instant::now();
         let mut driver = Driver {
@@ -51,6 +53,7 @@ impl Driver {
             notices: VecDeque::new(),
             view: View::default(),
             drift: Vec::new(),
+            hide,
         };
         let mut out = Out::default();
         driver.ws.add_network(config, &mut out);
@@ -106,7 +109,12 @@ impl Driver {
                 self.notices.push_back(line.plain_text());
             }
         }
-        if let Err(e) = self.view.apply(&self.ws, &out.changes) {
+        let shown: Vec<Change> = out
+            .changes
+            .into_iter()
+            .filter(|c| !(self.hide)(c))
+            .collect();
+        if let Err(e) = self.view.apply(&self.ws, &shown) {
             self.drift.push(e);
         }
     }
@@ -159,6 +167,98 @@ struct View {
     buffers: HashSet<BufferId>,
     members: HashMap<BufferId, Vec<MemberRow>>,
     lines: HashMap<BufferId, Vec<Rc<Line>>>,
+    /// The workspace after the last pass, to catch a fact that changed
+    /// with no `Change` saying so.
+    seen: Snapshot,
+}
+
+/// What the view reads from the workspace when a `Change` names it.
+#[derive(Default, PartialEq)]
+struct Snapshot {
+    buffers: HashMap<BufferId, Facts>,
+    focus: Option<BufferId>,
+    expanded: HashMap<ServerId, bool>,
+}
+
+#[derive(PartialEq)]
+struct Facts {
+    counters: Counters,
+    name: String,
+    joined: bool,
+    topic: Option<String>,
+    modes: Option<String>,
+}
+
+impl Snapshot {
+    fn of(ws: &Workspace) -> Self {
+        let buffers = ws
+            .networks()
+            .iter()
+            .flat_map(|n| n.buffers().iter())
+            .map(|b| {
+                let joined = b.joined();
+                let facts = Facts {
+                    counters: b.counters(),
+                    name: b.name().to_owned(),
+                    joined: joined.is_some(),
+                    topic: joined.and_then(|j| j.topic().map(str::to_owned)),
+                    modes: joined.map(|j| j.modes()),
+                };
+                (b.id(), facts)
+            })
+            .collect();
+        let expanded = ws
+            .networks()
+            .iter()
+            .map(|n| (n.id(), ws.is_expanded(n.id())))
+            .collect();
+        Snapshot {
+            buffers,
+            focus: ws.focus(),
+            expanded,
+        }
+    }
+
+    /// Every fact that differs from `before` without the change that
+    /// announces it.
+    fn unannounced(&self, before: &Snapshot, changes: &[Change]) -> Vec<String> {
+        let has = |want: &Change| changes.contains(want);
+        let mut missing = Vec::new();
+        if self.focus != before.focus && !self.focus.is_some_and(|f| has(&Change::Focus(f))) {
+            missing.push(format!(
+                "focus changed without Change::Focus ({:?} to {:?})",
+                before.focus, self.focus
+            ));
+        }
+        for (server, expanded) in &self.expanded {
+            let was = before.expanded.get(server);
+            if was.is_some_and(|w| w != expanded) && !has(&Change::Expanded(*server)) {
+                missing.push(format!(
+                    "{server:?} expanded changed without Change::Expanded"
+                ));
+            }
+        }
+        for (id, now) in &self.buffers {
+            let Some(was) = before.buffers.get(id) else {
+                continue;
+            };
+            if now.counters != was.counters && !has(&Change::Counters(*id)) {
+                missing.push(format!("{id} counters changed without Change::Counters"));
+            }
+            let fields = [
+                ("name", now.name != was.name),
+                ("joined", now.joined != was.joined),
+                ("topic", now.topic != was.topic),
+                ("modes", now.modes != was.modes),
+            ];
+            for (what, differs) in fields {
+                if differs && !has(&Change::BufferChanged(*id)) {
+                    missing.push(format!("{id} {what} changed without Change::BufferChanged"));
+                }
+            }
+        }
+        missing
+    }
 }
 
 fn rows(ws: &Workspace, id: BufferId) -> Vec<MemberRow> {
@@ -175,6 +275,12 @@ fn rows(ws: &Workspace, id: BufferId) -> Vec<MemberRow> {
 
 impl View {
     fn apply(&mut self, ws: &Workspace, changes: &[Change]) -> Result<(), String> {
+        let now = Snapshot::of(ws);
+        let missing = now.unannounced(&self.seen, changes);
+        self.seen = now;
+        if !missing.is_empty() {
+            return Err(missing.join("; "));
+        }
         let reset: HashSet<BufferId> = changes
             .iter()
             .filter_map(|c| match c {
@@ -312,9 +418,17 @@ impl View {
 ///   already connected: the connect, its notice and dial, and `opened` run
 ///   unchecked.
 /// - After every step, a view built only from the changes must match the
-///   workspace: buffers, member lists and lines.
+///   workspace: buffers, member lists and lines. Any change to a buffer's
+///   counters, name, joined state, topic or modes, to the focus or to a
+///   server's expansion must come with its `Change`.
 /// - `#` at the start of a line is a comment; blank lines are skipped.
 pub fn run_transcript(source: &str) -> Result<(), String> {
+    run_transcript_hiding(source, |_| false)
+}
+
+/// Runs a transcript with the changes `hide` matches withheld from the
+/// view.
+pub fn run_transcript_hiding(source: &str, hide: fn(&Change) -> bool) -> Result<(), String> {
     let mut config = ServerConfig {
         id: ServerId(1),
         addresses: vec![address("irc.test:6667")],
@@ -344,7 +458,7 @@ pub fn run_transcript(source: &str) -> Result<(), String> {
         }
 
         let t = driver.get_or_insert_with(|| {
-            let mut t = Driver::new(config.clone());
+            let mut t = Driver::new(config.clone(), hide);
             if !matches!(kind, "!" | "@") {
                 t.net(network::Input::Connect);
                 t.transport(t.latest.expect("dialed"), TransportEvent::Opened);

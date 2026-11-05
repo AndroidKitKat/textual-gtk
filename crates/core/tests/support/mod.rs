@@ -17,7 +17,7 @@ use textual_core::irc::caps::WANTED;
 use textual_core::model::registration::{Auth, Notice, Output, Progress, Registration, Setup};
 
 #[allow(unused_imports)]
-pub use transcript::run_transcript;
+pub use transcript::{run_transcript, run_transcript_hiding};
 
 pub fn setup(nick: &str) -> Setup {
     Setup {
