@@ -1,0 +1,12 @@
+# Lets development builds create the user namespaces WebKitGTK's bubblewrap
+# sandbox needs on Ubuntu 24.04+, where unprivileged userns is restricted.
+# Same shape as Ubuntu's own /etc/apparmor.d/epiphany profile.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile textual-gtk-dev /home/*/projects/textual-gtk/target/{debug,release}/textual-gtk flags=(unconfined) {
+  userns,
+
+  include if exists <local/textual-gtk-dev>
+}
