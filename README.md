@@ -14,6 +14,8 @@ target/debug/textual-gtk \
 
 Each `--network` is a comma-separated list of `key=value` pairs and adds one network to the sidebar. `name`, `host` and `nick` are required; names must differ, ignoring case. Optional: `port` (1 to 65535; 6667, or 6697 when `tls=on`), `tls=off|on` (off), `verify=true|false` (true; whether to check the server's certificate chain, with `tls=on`), `user` (the nick), `realname` (`Textual GTK`), `join` (space-separated channels to join once online; `#chan:key` for a keyed channel). An unknown key, or a key given twice, is an error. To put a comma in a value, write `\,`; write `\\` for a backslash, as in `realname=Doe\, Jane`.
 
+`--input-history-per-buffer true|false` (false) gives each buffer its own input history and unsent text, like Textual's `SaveInputHistoryPerSelection`; off, one history serves every buffer and the field keeps its text when the focus moves.
+
 `--rejoin-on-kick true|false` (false) joins a channel again three seconds after a kick, like Textual's "Automatically rejoin a channel when kicked" preference (`RejoinChannelOnLocalKick`), which applies to every network. `--style name` picks a folder under `resources/styling/Bundled Styles` (default `Simplified`). `--help` prints the usage. The saved configuration replaces these flags in a later unit.
 
 ## Checks
