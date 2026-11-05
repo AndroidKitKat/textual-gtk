@@ -23,6 +23,15 @@ pub struct Now {
     pub wall: DateTime<Local>,
 }
 
+/// Textual's application-wide preferences that the model follows. They
+/// are global in Textual (`TPCPreferences`), not per server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Preferences {
+    /// `RejoinChannelOnLocalKick`, off by default: join a channel again
+    /// three seconds after being kicked from it.
+    pub rejoin_on_kick: bool,
+}
+
 /// A model fact the view reacts to. Most carry only an id and the view
 /// reads the rest from the workspace; a line and a member diff carry their
 /// payload because later changes in the same pass can make them
@@ -71,6 +80,7 @@ impl Ids {
 pub(crate) struct Cx<'a> {
     pub now: Now,
     pub ids: &'a mut Ids,
+    pub prefs: Preferences,
 }
 
 impl Cx<'_> {

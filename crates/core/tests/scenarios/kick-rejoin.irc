@@ -1,7 +1,9 @@
 # A KICK of ourselves says it will rejoin, and sends one JOIN three seconds
 # later with the configured key. A second wake does not send it again, and
-# the server's JOIN ends the wait. (Textual's joinKickedChannel; its
-# "rejoin on local kick" preference is off by default there.)
+# the server's JOIN ends the wait. (Textual's joinKickedChannel, with its
+# "RejoinChannelOnLocalKick" preference on; kick-no-rejoin.irc has it off,
+# the default.)
+= rejoin-on-kick on
 = autojoin #c:sekrit
 ! welcome
 < :textual!u@h JOIN #c

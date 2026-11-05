@@ -4,6 +4,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 use textual_core::irc::caps::WANTED;
+use textual_core::model::Preferences;
 use textual_core::model::network::{
     Address, ChannelConfig, Input as NetInput, ServerConfig, ServerId, Tls,
 };
@@ -17,7 +18,7 @@ use textual_gtk::ui::probe;
 use textual_gtk::ui::view::View;
 
 const APP_ID: &str = "io.github.androidkitkat.TextualGtk";
-const USAGE: &str = "usage: textual-gtk --network 'name=Local,host=127.0.0.1,port=6667,tls=off,nick=me,join=#a #b' [--network ...] [--style name]
+const USAGE: &str = "usage: textual-gtk --network 'name=Local,host=127.0.0.1,port=6667,tls=off,nick=me,join=#a #b' [--network ...] [--style name] [--rejoin-on-kick true|false]
 network keys: name, host, nick (required); port (1-65535; 6667, or 6697 with tls=on); tls=off|on; verify=true|false (with tls=on); user (the nick); realname; join (space-separated channels, #chan:key for a key)
 write \\, for a comma inside a value and \\\\ for a backslash";
 
@@ -36,11 +37,13 @@ enum Command {
 struct Options {
     networks: Vec<ServerConfig>,
     style: String,
+    prefs: Preferences,
 }
 
 fn parse_options(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut networks = Vec::new();
     let mut style = "Simplified".to_owned();
+    let mut prefs = Preferences::default();
     let mut args = args;
     while let Some(flag) = args.next() {
         if flag == "--help" || flag == "-h" {
@@ -50,6 +53,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Command, String> 
         match flag.as_str() {
             "--network" => networks.push(parse_network(&value, networks.len() as u128 + 1)?),
             "--style" => style = value,
+            "--rejoin-on-kick" => prefs.rejoin_on_kick = boolean("--rejoin-on-kick", &value)?,
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -62,7 +66,11 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Command, String> 
             return Err(format!("two networks are named {}", net.name));
         }
     }
-    Ok(Command::Run(Options { networks, style }))
+    Ok(Command::Run(Options {
+        networks,
+        style,
+        prefs,
+    }))
 }
 
 fn boolean(key: &str, value: &str) -> Result<bool, String> {
@@ -211,6 +219,7 @@ fn main() -> glib::ExitCode {
     let tokio_handle = runtime.handle().clone();
     let pages_for_app = pages.clone();
     let networks = std::cell::RefCell::new(Some(options.networks));
+    let prefs = options.prefs;
     app.connect_activate(move |app| {
         let Some(networks) = networks.take() else {
             return;
@@ -228,7 +237,7 @@ fn main() -> glib::ExitCode {
                 return;
             }
         };
-        start(app, networks, style, &pages_for_app, &tokio_handle);
+        start(app, networks, prefs, style, &pages_for_app, &tokio_handle);
     });
     let status = app.run_with_args::<&str>(&[]);
     let _ = std::fs::remove_dir_all(&pages);
@@ -259,6 +268,7 @@ fn pages_dir() -> std::io::Result<PathBuf> {
 fn start(
     app: &adw::Application,
     networks: Vec<ServerConfig>,
+    prefs: Preferences,
     style: Rc<Style>,
     pages: &std::path::Path,
     runtime: &tokio::runtime::Handle,
@@ -269,7 +279,7 @@ fn start(
     std::mem::forget(handle.enter());
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut workspace = Workspace::new();
+    let mut workspace = Workspace::with_preferences(prefs);
     let mut out = Out::default();
     let servers: Vec<ServerId> = networks.iter().map(|n| n.id).collect();
     for config in networks {
@@ -372,6 +382,18 @@ mod tests {
             "name=a,host=h2,nick=n",
         ]);
         assert_eq!(twice.unwrap_err(), "two networks are named a");
+    }
+
+    #[test]
+    fn rejoin_on_kick_is_off_unless_asked_for() {
+        let net = ["--network", "name=a,host=h,nick=n"];
+        assert!(!parse(&net).unwrap().prefs.rejoin_on_kick);
+        let on = parse(&[net[0], net[1], "--rejoin-on-kick", "true"]).unwrap();
+        assert!(on.prefs.rejoin_on_kick);
+        assert_eq!(
+            parse(&[net[0], net[1], "--rejoin-on-kick", "yes"]).unwrap_err(),
+            "--rejoin-on-kick=yes: expected true or false"
+        );
     }
 
     #[test]

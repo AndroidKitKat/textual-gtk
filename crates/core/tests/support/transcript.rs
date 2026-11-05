@@ -20,7 +20,7 @@ use textual_core::model::network::{
 };
 use textual_core::model::registration::Auth;
 use textual_core::model::workspace::{Input, Out, UiAction, Workspace};
-use textual_core::model::{Change, Now};
+use textual_core::model::{Change, Now, Preferences};
 use textual_core::secret::Secret;
 
 use super::setup;
@@ -41,11 +41,11 @@ pub struct Driver {
 }
 
 impl Driver {
-    pub fn new(config: ServerConfig, hide: fn(&Change) -> bool) -> Self {
+    pub fn new(config: ServerConfig, prefs: Preferences, hide: fn(&Change) -> bool) -> Self {
         let server = config.id;
         let start = Instant::now();
         let mut driver = Driver {
-            ws: Workspace::new(),
+            ws: Workspace::with_preferences(prefs),
             server,
             start,
             now: start,
@@ -446,6 +446,7 @@ pub fn run_transcript(source: &str) -> Result<(), String> {
 /// Runs a transcript with the changes `hide` matches withheld from the
 /// view.
 pub fn run_transcript_hiding(source: &str, hide: fn(&Change) -> bool) -> Result<(), String> {
+    let mut prefs = Preferences::default();
     let mut config = ServerConfig {
         id: ServerId(1),
         addresses: vec![address("irc.test:6667")],
@@ -472,12 +473,17 @@ pub fn run_transcript_hiding(source: &str, hide: fn(&Change) -> bool) -> Result<
             if driver.is_some() {
                 return Err(format!("{n}: configuration after the first exchange"));
             }
-            configure(&mut config, rest).map_err(|e| format!("{n}: {e}"))?;
+            match rest.strip_prefix("rejoin-on-kick ") {
+                Some("on") => prefs.rejoin_on_kick = true,
+                Some("off") => prefs.rejoin_on_kick = false,
+                Some(other) => return Err(format!("{n}: rejoin-on-kick {other:?}: on or off")),
+                None => configure(&mut config, rest).map_err(|e| format!("{n}: {e}"))?,
+            }
             continue;
         }
 
         let t = driver.get_or_insert_with(|| {
-            let mut t = Driver::new(config.clone(), hide);
+            let mut t = Driver::new(config.clone(), prefs, hide);
             if !matches!(kind, "!" | "@") {
                 t.net(network::Input::Connect);
                 t.transport(t.latest.expect("dialed"), TransportEvent::Opened);

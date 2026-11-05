@@ -1,6 +1,7 @@
 # A kick followed by a link drop before the three seconds are up sends no
 # JOIN of its own: the channel waits for the next 001, which joins it once.
 # After the drop, only the retry timer is left.
+= rejoin-on-kick on
 ! welcome
 < :textual!u@h JOIN #c
 > MODE #c

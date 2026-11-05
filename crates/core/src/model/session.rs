@@ -332,7 +332,7 @@ impl Handler<'_, '_> {
         };
         self.print(msg);
         if self.s.is_me(nick) {
-            if kicked.is_some() {
+            if kicked.is_some() && self.cx.prefs.rejoin_on_kick {
                 let at = self.cx.now.mono + KICK_REJOIN_DELAY;
                 self.buffers.part(id, Rejoin::At(at), &mut self.out.changes);
                 let text = "Attempting to rejoin channel in three seconds";

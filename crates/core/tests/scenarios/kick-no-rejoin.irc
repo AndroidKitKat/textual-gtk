@@ -1,0 +1,33 @@
+# With Textual's default ("RejoinChannelOnLocalKick" off), a KICK of
+# ourselves leaves the channel parted and says nothing about rejoining. At
+# the next connect a configured channel is joined again (performAutoJoin);
+# one that is not configured stays parted.
+= autojoin #c
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+< :textual!u@h JOIN #d
+> MODE #d
+< :op!o@h KICK #c textual :bye
+? line #c op kicked textual from the channel (bye)
+? parted #c
+? rejoin #c no
+< :op!o@h KICK #d textual :bye
+? line #d op kicked textual from the channel (bye)
+? rejoin #d no
+@ +10s
+? lines #c 2
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 5 s
+! connect
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+> JOIN #c
+? parted #d
+? rejoin #d no
+? registered textual

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use crate::model::buffer::{Buffer, BufferId};
 use crate::model::network::{self, Effect, Network, ServerConfig, ServerId};
-use crate::model::{Change, Cx, Ids, Now};
+use crate::model::{Change, Cx, Ids, Now, Preferences};
 
 #[derive(Debug)]
 pub enum Input {
@@ -50,6 +50,7 @@ pub struct Workspace {
     window_active: bool,
     collapsed: HashSet<ServerId>,
     ids: Ids,
+    prefs: Preferences,
 }
 
 impl Default for Workspace {
@@ -60,12 +61,17 @@ impl Default for Workspace {
 
 impl Workspace {
     pub fn new() -> Self {
+        Workspace::with_preferences(Preferences::default())
+    }
+
+    pub fn with_preferences(prefs: Preferences) -> Self {
         Workspace {
             networks: Vec::new(),
             focus: None,
             window_active: true,
             collapsed: HashSet::new(),
             ids: Ids::default(),
+            prefs,
         }
     }
 
@@ -153,6 +159,7 @@ impl Workspace {
         let mut cx = Cx {
             now,
             ids: &mut self.ids,
+            prefs: self.prefs,
         };
         let mut net_out = network::Out::default();
         step(net, &mut cx, &mut net_out);
