@@ -1,4 +1,4 @@
-use textual_gtk::irc::{Message, Source};
+use textual_gtk::irc::{Message, Source, WireError};
 use yaml_rust2::{Yaml, YamlLoader};
 
 fn load(name: &str) -> Vec<Yaml> {
@@ -48,7 +48,8 @@ fn splits_every_ircdocs_vector() {
     assert!(cases.len() > 30, "loaded {} cases", cases.len());
     for case in cases {
         let input = case["input"].as_str().unwrap();
-        let expected = atoms_to_message(&case["atoms"]);
+        let mut expected = atoms_to_message(&case["atoms"]);
+        expected.command.make_ascii_uppercase();
         let mut got = Message::parse(input).unwrap_or_else(|e| panic!("{input:?}: {e}"));
         got.tags.sort();
         assert_eq!(got, expected, "input {input:?}");
@@ -65,7 +66,8 @@ fn joins_every_ircdocs_vector() {
             .iter()
             .map(|m| str_of(m).unwrap())
             .collect();
-        let wire = message.to_string();
+        let wire = message.to_wire().unwrap();
+        let wire = wire.strip_suffix("\r\n").unwrap().to_owned();
         assert!(
             matches.contains(&wire),
             "{:?}: produced {wire:?}, expected one of {matches:?}",
@@ -93,7 +95,61 @@ fn round_trips_a_tagged_privmsg() {
     let message = Message::parse(line).unwrap();
     assert_eq!(message.tag("msgid"), Some("a b"));
     assert_eq!(message.source().unwrap().nick, "nick");
-    assert_eq!(message.to_string(), line);
+    assert_eq!(message.to_wire().unwrap(), format!("{line}\r\n"));
+}
+
+#[test]
+fn uppercases_commands_on_parse() {
+    assert_eq!(Message::parse("privmsg #a :b").unwrap().command, "PRIVMSG");
+}
+
+#[test]
+fn refuses_to_serialize_anything_that_would_not_round_trip() {
+    let cases: &[(&str, &[&str], WireError)] = &[
+        ("PRIVMSG", &["#c", "hi\r\nQUIT :pwn"], WireError::LineBreak),
+        ("PRIVMSG", &["#c\r\nQUIT", "x"], WireError::LineBreak),
+        ("PRIVMSG", &["#c", "nul\0"], WireError::LineBreak),
+        (
+            "PRIVMSG",
+            &["a b", "x"],
+            WireError::Malformed("middle parameter"),
+        ),
+        (
+            "PRIVMSG",
+            &["", "x"],
+            WireError::Malformed("middle parameter"),
+        ),
+        (
+            "PRIVMSG",
+            &[":a", "x"],
+            WireError::Malformed("middle parameter"),
+        ),
+        ("", &[], WireError::Malformed("command")),
+        ("PRIV MSG", &[], WireError::Malformed("command")),
+    ];
+    for (command, params, expected) in cases {
+        let message = Message::new(command, params);
+        assert_eq!(message.to_wire(), Err(expected.clone()), "{message:?}");
+    }
+
+    let mut message = Message::new("PING", &["x"]);
+    message.source = Some("a b".into());
+    assert_eq!(message.to_wire(), Err(WireError::Malformed("source")));
+    message.source = None;
+    message.tags = vec![("k=v".into(), String::new())];
+    assert_eq!(message.to_wire(), Err(WireError::Malformed("tag key")));
+}
+
+#[test]
+fn every_serialized_line_parses_back_to_itself() {
+    let message = Message {
+        tags: vec![("+draft/x".into(), "a;b c\\d\re\nf".into())],
+        source: Some("n!u@h".into()),
+        command: "PRIVMSG".into(),
+        params: vec!["#c".into(), ":leading colon".into()],
+    };
+    let wire = message.to_wire().unwrap();
+    assert_eq!(Message::parse(&wire).unwrap(), message);
 }
 
 #[test]

@@ -39,7 +39,8 @@ impl Message {
     }
 
     /// Parses one line. A trailing CR/LF is ignored. Runs of spaces between
-    /// atoms count as one separator, as RFC 1459 allows.
+    /// atoms count as one separator, as RFC 1459 allows. The command is
+    /// uppercased, since IRC commands are case-insensitive.
     pub fn parse(line: &str) -> Result<Self, ParseError> {
         let mut rest = line.trim_end_matches(['\r', '\n']).trim_start_matches(' ');
         if rest.is_empty() {
@@ -89,7 +90,7 @@ impl Message {
         Ok(Message {
             tags,
             source,
-            command: command.to_owned(),
+            command: command.to_ascii_uppercase(),
             params,
         })
     }
@@ -138,52 +139,104 @@ fn unescape_tag_value(raw: &str) -> String {
     out
 }
 
-fn escape_tag_value(value: &str, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+fn escape_tag_value(value: &str, out: &mut String) {
     for c in value.chars() {
         match c {
-            ';' => out.write_str("\\:")?,
-            ' ' => out.write_str("\\s")?,
-            '\\' => out.write_str("\\\\")?,
-            '\r' => out.write_str("\\r")?,
-            '\n' => out.write_str("\\n")?,
-            c => write!(out, "{c}")?,
+            ';' => out.push_str("\\:"),
+            ' ' => out.push_str("\\s"),
+            '\\' => out.push_str("\\\\"),
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
         }
     }
-    Ok(())
 }
 
-/// Wire form without the CRLF terminator.
-impl fmt::Display for Message {
+/// Why a `Message` cannot be put on the wire as it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireError {
+    /// CR, LF or NUL outside a tag value, which would end the line early and
+    /// let the rest be read as another command.
+    LineBreak,
+    /// An atom that would split, vanish or change meaning when re-parsed.
+    Malformed(&'static str),
+}
+
+impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WireError::LineBreak => f.write_str("contains CR, LF or NUL"),
+            WireError::Malformed(what) => write!(f, "malformed {what}"),
+        }
+    }
+}
+
+impl std::error::Error for WireError {}
+
+fn check_atom(atom: &str, what: &'static str) -> Result<(), WireError> {
+    if atom.contains(['\r', '\n', '\0']) {
+        Err(WireError::LineBreak)
+    } else if atom.is_empty() || atom.contains(' ') {
+        Err(WireError::Malformed(what))
+    } else {
+        Ok(())
+    }
+}
+
+impl Message {
+    /// The line to send, CRLF included. Fails rather than emit a line that
+    /// would parse back as anything other than this message.
+    pub fn to_wire(&self) -> Result<String, WireError> {
+        let mut out = String::with_capacity(64);
         if !self.tags.is_empty() {
-            f.write_str("@")?;
+            out.push('@');
             for (i, (key, value)) in self.tags.iter().enumerate() {
-                if i > 0 {
-                    f.write_str(";")?;
+                check_atom(key, "tag key")?;
+                if key.contains([';', '=']) {
+                    return Err(WireError::Malformed("tag key"));
                 }
-                f.write_str(key)?;
+                if value.contains('\0') {
+                    return Err(WireError::LineBreak);
+                }
+                if i > 0 {
+                    out.push(';');
+                }
+                out.push_str(key);
                 if !value.is_empty() {
-                    f.write_str("=")?;
-                    escape_tag_value(value, f)?;
+                    out.push('=');
+                    escape_tag_value(value, &mut out);
                 }
             }
-            f.write_str(" ")?;
+            out.push(' ');
         }
         if let Some(source) = &self.source {
-            write!(f, ":{source} ")?;
+            check_atom(source, "source")?;
+            out.push(':');
+            out.push_str(source);
+            out.push(' ');
         }
-        f.write_str(&self.command)?;
+        check_atom(&self.command, "command")?;
+        out.push_str(&self.command);
         if let Some((last, middle)) = self.params.split_last() {
             for param in middle {
-                write!(f, " {param}")?;
+                check_atom(param, "middle parameter")?;
+                if param.starts_with(':') {
+                    return Err(WireError::Malformed("middle parameter"));
+                }
+                out.push(' ');
+                out.push_str(param);
             }
+            if last.contains(['\r', '\n', '\0']) {
+                return Err(WireError::LineBreak);
+            }
+            out.push(' ');
             if last.is_empty() || last.starts_with(':') || last.contains(' ') {
-                write!(f, " :{last}")?;
-            } else {
-                write!(f, " {last}")?;
+                out.push(':');
             }
+            out.push_str(last);
         }
-        Ok(())
+        out.push_str("\r\n");
+        Ok(out)
     }
 }
 
