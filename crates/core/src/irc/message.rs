@@ -276,6 +276,16 @@ impl fmt::Debug for WireLine {
 }
 
 impl WireLine {
+    /// A line the user typed whole (`/raw`, an unknown command), sent as
+    /// typed, like Textual's `sendLine:`. It is not parsed: only CR, LF and
+    /// NUL are refused, since they would end it early or start another.
+    pub fn typed(text: &str) -> Result<WireLine, WireError> {
+        if text.contains(['\r', '\n', '\0']) {
+            return Err(WireError::LineBreak);
+        }
+        Ok(WireLine(format!("{text}\r\n")))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

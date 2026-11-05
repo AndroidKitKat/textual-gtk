@@ -292,3 +292,41 @@ fn a_long_line_is_cut_to_what_the_server_relays() {
     }
     assert_eq!(unknown.concat(), text);
 }
+
+/// Every line sent, byte for byte, CRLF included.
+fn sent_raw(out: &Out) -> Vec<String> {
+    out.effects
+        .iter()
+        .filter_map(|(_, e)| match e {
+            Effect::Send { line, .. } => Some(line.as_str().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn raw_and_unknown_commands_go_out_as_typed() {
+    let mut h = Harness::new();
+    let server = ServerId(1);
+    h.ws.add_network(config(1, "irc.test"), &mut Out::default());
+    h.register(server);
+    let console = h.buffer(server, "irc.test");
+    let mut typed = |text: &str| {
+        let out = h.input(Input::Ui(UiAction::Submit {
+            buffer: console,
+            text: text.to_owned(),
+            confirmed: true,
+        }));
+        sent_raw(&out)
+    };
+    // Textual's `sendLine:` with the typed string untouched.
+    assert_eq!(typed("/raw PRIVMSG #x :two  "), ["PRIVMSG #x :two  \r\n"]);
+    assert_eq!(typed("quote  WHOIS  a  "), ["WHOIS  a  \r\n"]);
+    // Unknown: `UPPERCASE rest`, with the space even when there is no rest
+    // (`sendCommand:withData:`), and any characters in the command.
+    assert_eq!(typed("/test-x y "), ["TEST-X y \r\n"]);
+    assert_eq!(typed("version"), ["VERSION \r\n"]);
+    assert_eq!(typed("/ümlaut"), ["ÜMLAUT \r\n"]);
+    // What would end the line early or smuggle another is still refused.
+    assert!(typed("/raw PRIVMSG #x :a\0b").is_empty());
+}

@@ -7,8 +7,8 @@ use std::ops::Range;
 
 use crate::input::commands::{self, COMMANDS, Spec, Typed, Verb, classify, split_lines, token};
 use crate::input::completion::{self, Source};
-use crate::irc::Message;
 use crate::irc::isupport::Isupport;
+use crate::irc::{Message, WireLine};
 use crate::model::buffer::{Body, BufferId};
 use crate::model::network::{self, Network, Speech};
 use crate::model::workspace::{Out, UiEffect, Workspace};
@@ -271,9 +271,8 @@ impl Run<'_, '_, '_> {
 
     /// A line typed whole: `/raw`, `/quote` and unknown commands.
     fn raw(&mut self, line: &str) {
-        match Message::parse(line.trim_end()).map(|m| m.to_wire()) {
-            Ok(Ok(line)) => self.net.send_line(line, self.cx, self.out),
-            Ok(Err(e)) => self.print(&format!("Not sent: {e}")),
+        match WireLine::typed(line) {
+            Ok(line) => self.net.send_line(line, self.cx, self.out),
             Err(e) => self.print(&format!("Not sent: {e}")),
         }
     }
