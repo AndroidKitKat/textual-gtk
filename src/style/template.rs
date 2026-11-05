@@ -113,6 +113,8 @@ impl Template {
                         && top.expr.as_ref() == Some(&expr);
                     if is_else {
                         top.in_else = true;
+                    } else if stack.len() > MAX_NESTING {
+                        return Err(error(token.line, "sections nested too deeply".into()));
                     } else {
                         stack.push(Frame::section(expr, inverted, token.line));
                     }
@@ -158,7 +160,7 @@ impl Template {
     ) -> String {
         let mut out = String::new();
         let mut stack = vec![context];
-        render_nodes(&self.nodes, &mut stack, partial, &mut out, 0);
+        render_nodes(&self.nodes, &mut stack, partial, &mut out, &mut Vec::new());
         out
     }
 }
@@ -206,15 +208,15 @@ fn error(line: usize, message: String) -> TemplateError {
     TemplateError { line, message }
 }
 
-/// Partials nested deeper than this are treated as a cycle and render nothing.
-const MAX_PARTIAL_DEPTH: usize = 16;
+/// Deeper nesting is refused so rendering cannot overflow the stack.
+const MAX_NESTING: usize = 128;
 
 fn render_nodes<'v, 't>(
     nodes: &[Node],
     stack: &mut Vec<&'v Value>,
     partial: &dyn Fn(&str) -> Option<&'t Template>,
     out: &mut String,
-    depth: usize,
+    active_partials: &mut Vec<String>,
 ) where
     't: 'v,
 {
@@ -242,31 +244,33 @@ fn render_nodes<'v, 't>(
                 let truthy = value.is_some_and(Value::is_truthy);
                 if *inverted {
                     let branch = if truthy { otherwise } else { body };
-                    render_nodes(branch, stack, partial, out, depth);
+                    render_nodes(branch, stack, partial, out, active_partials);
                 } else if !truthy {
-                    render_nodes(otherwise, stack, partial, out, depth);
+                    render_nodes(otherwise, stack, partial, out, active_partials);
                 } else {
                     match value.unwrap() {
                         Value::List(items) => {
                             for item in items {
                                 stack.push(item);
-                                render_nodes(body, stack, partial, out, depth);
+                                render_nodes(body, stack, partial, out, active_partials);
                                 stack.pop();
                             }
                         }
                         other => {
                             stack.push(other);
-                            render_nodes(body, stack, partial, out, depth);
+                            render_nodes(body, stack, partial, out, active_partials);
                             stack.pop();
                         }
                     }
                 }
             }
             Node::Partial(name) => {
-                if depth < MAX_PARTIAL_DEPTH
+                if !active_partials.contains(name)
                     && let Some(template) = partial(name)
                 {
-                    render_nodes(&template.nodes, stack, partial, out, depth + 1);
+                    active_partials.push(name.clone());
+                    render_nodes(&template.nodes, stack, partial, out, active_partials);
+                    active_partials.pop();
                 }
             }
         }
@@ -576,6 +580,21 @@ mod tests {
             (name == "inner").then_some(&inner)
         });
         assert_eq!(got, "a[1]bc");
+    }
+
+    #[test]
+    fn a_partial_that_includes_itself_renders_once() {
+        let looping = Template::parse("x{{>p}}{{>p}}{{>p}}").unwrap();
+        let got = looping.render(&map(&[]), &|_| Some(&looping));
+        assert_eq!(got, "xxxx");
+    }
+
+    #[test]
+    fn refuses_nesting_deep_enough_to_overflow() {
+        let deep = format!("{}x{}", "{{#a}}".repeat(1000), "{{/a}}".repeat(1000));
+        assert!(Template::parse(&deep).is_err());
+        let fine = format!("{}x{}", "{{#a}}".repeat(100), "{{/a}}".repeat(100));
+        assert!(Template::parse(&fine).is_ok());
     }
 
     #[test]
