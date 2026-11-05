@@ -8,8 +8,8 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{gio, glib};
-use textual_core::model::buffer::BufferId;
-use textual_core::model::network::ServerId;
+use textual_core::model::buffer::{Buffer, BufferId};
+use textual_core::model::network::{Network, ServerId};
 use textual_core::model::workspace::{UiAction, Workspace};
 
 use crate::app::Inbox;
@@ -114,64 +114,57 @@ impl Sidebar {
         &self.widget
     }
 
-    /// A console becomes a server row; anything else a child row at the
-    /// model's position among that network's other buffers.
-    pub fn add_buffer(&mut self, ws: &Workspace, id: BufferId) {
-        let Some((net, buf)) = ws.buffer(id) else {
-            return;
-        };
-        if buf.is_console() {
-            let row = ServerRow::new(net.id(), id, &server_text(ws, net.id()));
-            self.root.append(&row);
-            if let Some(tree_row) = self.server_tree_row(&row) {
-                self.quiet
-                    .during(|| tree_row.set_expanded(ws.is_expanded(net.id())));
+    /// Makes the rows match the workspace: a server row per network (the
+    /// console is the server row), under it a row per channel and query in
+    /// the network's order. Rows that exist are moved, not rebuilt, so
+    /// their selection and expansion survive; the final workspace decides,
+    /// so it does not matter how many buffers came and went in the pass.
+    pub fn sync_rows(&mut self, ws: &Workspace) {
+        let quiet = self.quiet.clone();
+        quiet.during(|| {
+            for net in ws.networks() {
+                if !self.servers.contains_key(&net.id()) {
+                    let console = net.buffers().console().id();
+                    let row = ServerRow::new(net.id(), console, &server_text(ws, net.id()));
+                    self.root.append(&row);
+                    if let Some(tree_row) = self.server_tree_row(&row) {
+                        tree_row.set_expanded(ws.is_expanded(net.id()));
+                    }
+                    self.servers.insert(net.id(), row);
+                }
+                let children = self.servers[&net.id()].children();
+                let wanted: Vec<BufferRow> = net
+                    .buffers()
+                    .iter()
+                    .filter(|b| !b.is_console())
+                    .map(|buf| {
+                        self.buffers
+                            .entry(buf.id())
+                            .or_insert_with(|| BufferRow::new(buf.id(), &buffer_text(net, buf)))
+                            .clone()
+                    })
+                    .collect();
+                for (at, row) in (0u32..).zip(&wanted) {
+                    if children.item(at).as_ref() == Some(row.upcast_ref()) {
+                        continue;
+                    }
+                    if let Some(from) = children.find(row) {
+                        children.remove(from);
+                    }
+                    children.insert(at, row);
+                }
+                let extra = children.n_items().saturating_sub(wanted.len() as u32);
+                children.splice(wanted.len() as u32, extra, &[] as &[BufferRow]);
             }
-            self.servers.insert(net.id(), row);
-            return;
-        }
-        let Some(server) = self.servers.get(&net.id()) else {
-            return;
-        };
-        let at = net
-            .buffers()
-            .iter()
-            .position(|b| b.id() == id)
-            .expect("the buffer is in its network") as u32;
-        let row = BufferRow::new(
-            id,
-            &RowText {
-                label: buf.name().to_owned(),
-                badge: badge(buf.counters()),
-                classes: owned(classes::buffer_row_classes(net, buf)),
-            },
-        );
-        server.children().insert(at - 1, &row);
-        self.buffers.insert(id, row);
-    }
-
-    pub fn remove_buffer(&mut self, id: BufferId) {
-        let Some(row) = self.buffers.remove(&id) else {
-            return;
-        };
-        for server in self.servers.values() {
-            let children = server.children();
-            if let Some(at) = children.find(&row) {
-                children.remove(at);
-                return;
-            }
-        }
+        });
+        self.buffers.retain(|id, _| ws.buffer(*id).is_some());
     }
 
     pub fn refresh_buffer(&self, ws: &Workspace, id: BufferId) {
         let (Some(row), Some((net, buf))) = (self.buffers.get(&id), ws.buffer(id)) else {
             return;
         };
-        row.update(&RowText {
-            label: buf.name().to_owned(),
-            badge: badge(buf.counters()),
-            classes: owned(classes::buffer_row_classes(net, buf)),
-        });
+        row.update(&buffer_text(net, buf));
     }
 
     /// The server row and, since a query's state follows the link, every
@@ -282,6 +275,14 @@ fn server_text(ws: &Workspace, server: ServerId) -> RowText {
         label: net.config().name.clone(),
         badge: String::new(),
         classes: owned(classes::server_row_classes(net)),
+    }
+}
+
+fn buffer_text(net: &Network, buf: &Buffer) -> RowText {
+    RowText {
+        label: buf.name().to_owned(),
+        badge: badge(buf.counters()),
+        classes: owned(classes::buffer_row_classes(net, buf)),
     }
 }
 

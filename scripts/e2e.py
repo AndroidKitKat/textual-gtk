@@ -28,6 +28,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -169,11 +170,117 @@ def app_pid(app):
     return next(pid for pid, comm in descendants(app.pid) if comm == "textual-gtk")
 
 
+def our_glib_complaints(log):
+    """GLib, GIO or GTK criticals and warnings the app process itself logged."""
+    return [l for l in log.read_text(errors="replace").splitlines()
+            if l.startswith("(textual-gtk:") and ("-CRITICAL **" in l or "-WARNING **" in l)]
+
+
 def opaque_at(png, x, y):
     with Image.open(png) as image:
         image = image.convert("RGBA")
         width, height = image.size
         return image.getpixel((x if x >= 0 else width + x, y if y >= 0 else height + y))[3] == 255
+
+
+class FakeServer:
+    """A one-client IRC server on an ephemeral port, for what the real one
+    cannot do on cue, such as several lines in one write."""
+
+    def __init__(self):
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(1)
+        self.port = self.listener.getsockname()[1]
+        self.lines = []
+        self.lock = threading.Lock()
+        self.conn = None
+
+    def accept(self, timeout=45):
+        self.listener.settimeout(timeout)
+        self.conn, _ = self.listener.accept()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        buf = b""
+        while True:
+            try:
+                chunk = self.conn.recv(4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            buf += chunk
+            while b"\r\n" in buf:
+                raw, buf = buf.split(b"\r\n", 1)
+                with self.lock:
+                    self.lines.append(raw.decode(errors="replace"))
+
+    def send(self, *lines):
+        self.conn.sendall(b"".join(l.encode() + b"\r\n" for l in lines))
+
+    def wait_for(self, predicate, timeout=15):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                for i, line in enumerate(self.lines):
+                    if predicate(line):
+                        del self.lines[: i + 1]
+                        return line
+            time.sleep(0.05)
+        return None
+
+
+def fake_server_checks(binary, out, bus_config, checks):
+    """One network on a fake server: buffers opened by one server write
+    land in the sidebar in the model's order."""
+    out.mkdir(parents=True, exist_ok=True)
+    prefix = out / "probe"
+    for suffix in (".json", ".png", ".reload", ".close", ".actions"):
+        prefix.with_suffix(suffix).unlink(missing_ok=True)
+    log = out / "app.log"
+    server = FakeServer()
+    env = dict(os.environ, TEXTUAL_GTK_PROBE=str(prefix), GSK_RENDERER="cairo", GTK_A11Y="none")
+    app = subprocess.Popen(
+        ["dbus-run-session", f"--config-file={bus_config}", "--",
+         "xvfb-run", "-a", "-s", "-screen 0 1100x700x24", str(binary),
+         "--network", f"name=F,host=127.0.0.1,port={server.port},nick=me,join=#a"],
+        env=env, stdout=open(log, "w"), stderr=subprocess.STDOUT, start_new_session=True,
+    )
+    probe = Probe(prefix, app, log)
+    ids = lambda v: [r["id"] for r in v["rows"]]
+    try:
+        server.accept()
+        if server.wait_for(lambda l: l.startswith("USER")) is None:
+            fail("the app never registered with the fake server")
+        server.send(":srv CAP * LS :")
+        server.wait_for(lambda l: l.startswith("CAP END"), 3)
+        server.send(":srv 001 me :Welcome", ":srv 005 me PREFIX=(ov)@+ CHANTYPES=# CASEMAPPING=ascii :are supported",
+                    ":srv 376 me :End")
+        if server.wait_for(lambda l: l.startswith("JOIN #a")) is None:
+            fail("the app never joined #a on the fake server")
+        server.send(":me!u@h JOIN #a", ":srv 353 me = #a :@me bob", ":srv 366 me #a :End")
+        probe.wait_view(lambda v: "state-joined" in v["rows"][1]["classes"], "#a to be joined on the fake server")
+
+        server.send(":bob!u@h PRIVMSG me :hi", ":me!u@h JOIN #new", ":srv 353 me = #new :me", ":srv 366 me #new :End")
+        time.sleep(3)
+        view = probe.state()["view"]
+        checks["a query and a channel opened by one server write keep the model's order"] = ids(view) == ["F", "F/#a", "F/#new", "F/bob"]
+        server.send(":carol!u@h PRIVMSG me :hey")
+        time.sleep(3)
+        view = probe.state()["view"]
+        checks["a later query lands after the others"] = ids(view) == ["F", "F/#a", "F/#new", "F/bob", "F/carol"]
+    finally:
+        if app.poll() is None:
+            os.killpg(app.pid, signal.SIGTERM)
+            try:
+                app.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(app.pid, signal.SIGKILL)
+    complaints = our_glib_complaints(log)
+    checks["the fake-server run logs no GLib criticals or warnings"] = not complaints
+    for line in complaints[:5]:
+        print(f"     {line}")
 
 
 def row(view, row_id):
@@ -391,6 +498,13 @@ def main():
             checks["the app exits after closing"] = app.returncode == 0
         except subprocess.TimeoutExpired:
             checks["the app exits after closing"] = False
+
+        complaints = our_glib_complaints(log)
+        checks["the app logs no GLib criticals or warnings"] = not complaints
+        for line in complaints[:5]:
+            print(f"     {line}")
+
+        fake_server_checks(binary, out / "fake", bus_config, checks)
 
         report()
         print(json.dumps({k: v for k, v in before.items() if k != "lastHtml"}, indent=2))

@@ -138,20 +138,20 @@ impl View {
         let mut rebuilt = HashSet::new();
         // Only where the focus ends up is selected, once: GTK may also
         // have moved or dropped the selection while rows came and went.
-        let reselect = changes.iter().any(|c| {
-            matches!(
-                c,
-                Change::Focus(_)
-                    | Change::Expanded(_)
-                    | Change::BufferAdded(_)
-                    | Change::BufferRemoved(_)
-            )
-        });
+        let restructured = changes
+            .iter()
+            .any(|c| matches!(c, Change::BufferAdded(_) | Change::BufferRemoved(_)));
+        let reselect = restructured
+            || changes
+                .iter()
+                .any(|c| matches!(c, Change::Focus(_) | Change::Expanded(_)));
+        if restructured {
+            self.sidebar.sync_rows(ws);
+        }
         for change in changes {
             match change {
-                Change::BufferAdded(id) => self.sidebar.add_buffer(ws, *id),
+                Change::BufferAdded(_) => {}
                 Change::BufferRemoved(id) => {
-                    self.sidebar.remove_buffer(*id);
                     if let Some(chat) = self.chats.remove(id) {
                         self.stack.remove(&chat.widget());
                     }
