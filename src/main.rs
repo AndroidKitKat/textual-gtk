@@ -1,56 +1,128 @@
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use chrono::Local;
 use gtk::glib;
-use textual_core::irc::Message;
-use textual_core::irc::isupport::Isupport;
-use textual_core::line::{Destination, Line, LineId, LineType, Stamp};
+use textual_core::irc::caps::WANTED;
+use textual_core::model::network::{
+    Address, ChannelConfig, Input as NetInput, ServerConfig, ServerId, Tls,
+};
+use textual_core::model::registration::{Auth, Setup};
+use textual_core::model::workspace::{Input, Out, Workspace};
 use textual_core::style::{Appearance, Style};
-use textual_gtk::irc::connection::{self, Command, Config, Disconnect, Event};
-use textual_gtk::ui::chat_view::{self, ChatView};
+use textual_gtk::app;
+use textual_gtk::io::Io;
+use textual_gtk::ui::chat_view;
+use textual_gtk::ui::probe;
+use textual_gtk::ui::view::View;
 
 const APP_ID: &str = "io.github.androidkitkat.TextualGtk";
-const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+const USAGE: &str = "usage: textual-gtk --network 'name=Local,host=127.0.0.1,port=6667,tls=off,nick=me,join=#a #b' [--network ...] [--style name]
+network keys: name, host, nick (required); port (6667, or 6697 with tls=on); tls=off|on; verify=true|false (with tls=on); user (the nick); realname; join (space-separated channels, #chan:key for a key)";
 
-/// Phase-1 settings, from the command line:
-/// `textual-gtk [--server host:port] [--nick nick] [--channel #chan] [--style name]`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Options {
-    host: String,
-    port: u16,
-    nick: String,
-    channel: String,
+    networks: Vec<ServerConfig>,
     style: String,
 }
 
-fn parse_options() -> Result<Options, String> {
-    let mut options = Options {
-        host: "127.0.0.1".into(),
-        port: 6667,
-        nick: "textual".into(),
-        channel: "#textual".into(),
-        style: "Simplified".into(),
-    };
-    let mut args = std::env::args().skip(1);
+fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> {
+    let mut networks = Vec::new();
+    let mut style = "Simplified".to_owned();
+    let mut args = args;
     while let Some(flag) = args.next() {
-        let mut value = || args.next().ok_or(format!("{flag} needs a value"));
+        let value = args.next().ok_or(format!("{flag} needs a value"))?;
         match flag.as_str() {
-            "--server" => {
-                let server = value()?;
-                let (host, port) = server.rsplit_once(':').unwrap_or((&server, "6667"));
-                options.host = host.to_owned();
-                options.port = port.parse().map_err(|_| format!("bad port in {server}"))?;
-            }
-            "--nick" => options.nick = value()?,
-            "--channel" => options.channel = value()?,
-            "--style" => options.style = value()?,
+            "--network" => networks.push(parse_network(&value, networks.len() as u128 + 1)?),
+            "--style" => style = value,
             other => return Err(format!("unknown option {other}")),
         }
     }
-    Ok(options)
+    if networks.is_empty() {
+        return Err(USAGE.to_owned());
+    }
+    for (i, net) in networks.iter().enumerate() {
+        if networks[..i].iter().any(|n| n.name == net.name) {
+            return Err(format!("two networks are named {}", net.name));
+        }
+    }
+    Ok(Options { networks, style })
+}
+
+/// `key=value,key=value`; `join` takes a space-separated list.
+fn parse_network(spec: &str, index: u128) -> Result<ServerConfig, String> {
+    let mut fields = std::collections::HashMap::new();
+    for pair in spec.split(',').filter(|p| !p.trim().is_empty()) {
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or(format!("{pair:?} is not key=value"))?;
+        fields.insert(key.trim(), value.trim());
+    }
+    let required = |key: &str| {
+        fields
+            .get(key)
+            .filter(|v| !v.is_empty())
+            .map(|v| (*v).to_owned())
+            .ok_or(format!("--network needs {key}="))
+    };
+    let name = required("name")?;
+    let host = required("host")?;
+    let nick = required("nick")?;
+    let tls = match fields.get("tls").copied().unwrap_or("off") {
+        "off" => Tls::Off,
+        "on" => Tls::On {
+            verify: match fields.get("verify").copied().unwrap_or("true") {
+                "true" => true,
+                "false" => false,
+                other => return Err(format!("verify={other}: expected true or false")),
+            },
+        },
+        other => return Err(format!("tls={other}: expected on or off")),
+    };
+    let port = match fields.get("port") {
+        Some(p) => p.parse().map_err(|_| format!("bad port {p}"))?,
+        None if matches!(tls, Tls::On { .. }) => 6697,
+        None => 6667,
+    };
+    let autojoin = fields
+        .get("join")
+        .map(|list| {
+            list.split_whitespace()
+                .map(|entry| {
+                    let (name, key) = entry
+                        .split_once(':')
+                        .map_or((entry, None), |(n, k)| (n, Some(k.to_owned())));
+                    ChannelConfig {
+                        name: name.to_owned(),
+                        key,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ServerConfig {
+        id: ServerId(index),
+        name,
+        addresses: vec![Address { host, port }],
+        tls,
+        auto_reconnect: true,
+        setup: Setup {
+            username: fields
+                .get("user")
+                .map_or_else(|| nick.clone(), |u| (*u).to_owned()),
+            nick,
+            alternates: Vec::new(),
+            realname: fields
+                .get("realname")
+                .map_or("Textual GTK", |r| r)
+                .to_owned(),
+            auth: Auth::None,
+            server_password: None,
+            account_password: None,
+        },
+        autojoin,
+        wanted_caps: WANTED.iter().map(|c| (*c).to_owned()).collect(),
+    })
 }
 
 fn resources_dir() -> PathBuf {
@@ -60,11 +132,11 @@ fn resources_dir() -> PathBuf {
 }
 
 fn main() -> glib::ExitCode {
-    let options = match parse_options() {
+    let options = match parse_options(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(e) => {
             eprintln!("textual-gtk: {e}");
-            return glib::ExitCode::FAILURE;
+            return glib::ExitCode::from(2);
         }
     };
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -85,7 +157,11 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     let tokio_handle = runtime.handle().clone();
     let pages_for_app = pages.clone();
+    let networks = std::cell::RefCell::new(Some(options.networks));
     app.connect_activate(move |app| {
+        let Some(networks) = networks.take() else {
+            return;
+        };
         let appearance = if adw::StyleManager::default().is_dark() {
             Appearance::Dark
         } else {
@@ -99,7 +175,7 @@ fn main() -> glib::ExitCode {
                 return;
             }
         };
-        build_window(app, &options, style, &pages_for_app, &tokio_handle);
+        start(app, networks, style, &pages_for_app, &tokio_handle);
     });
     let status = app.run_with_args::<&str>(&[]);
     let _ = std::fs::remove_dir_all(&pages);
@@ -125,240 +201,116 @@ fn pages_dir() -> std::io::Result<PathBuf> {
     Ok(root.join(std::process::id().to_string()))
 }
 
-fn build_window(
+/// The design's "Usage" block: build the model, the view and the I/O, then
+/// hand them to the one loop.
+fn start(
     app: &adw::Application,
-    options: &Options,
+    networks: Vec<ServerConfig>,
     style: Rc<Style>,
     pages: &std::path::Path,
     runtime: &tokio::runtime::Handle,
 ) {
-    let view = ChatView::new(&style, &options.channel, pages);
+    // The loop sleeps with tokio::time::sleep_until on the GTK thread,
+    // which needs the runtime entered there for as long as the app runs.
+    let handle: &'static tokio::runtime::Handle = Box::leak(Box::new(runtime.clone()));
+    std::mem::forget(handle.enter());
 
-    let entry = gtk::Entry::builder()
-        .placeholder_text(format!("Message {}", options.channel))
-        .margin_start(6)
-        .margin_end(6)
-        .margin_top(6)
-        .margin_bottom(6)
-        .sensitive(false)
-        .build();
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    content.append(&view.widget());
-    content.append(&entry);
-
-    let title = adw::WindowTitle::new(
-        &options.channel,
-        &format!("{}:{}", options.host, options.port),
-    );
-    let header = adw::HeaderBar::builder().title_widget(&title).build();
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&content));
-
-    let window = adw::ApplicationWindow::builder()
-        .application(app)
-        .title("Textual GTK")
-        .default_width(900)
-        .default_height(600)
-        .content(&toolbar)
-        .build();
-    if let Some(prefix) = std::env::var_os("TEXTUAL_GTK_PROBE") {
-        install_probe(&view, &window, PathBuf::from(prefix));
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut workspace = Workspace::new();
+    let mut out = Out::default();
+    let servers: Vec<ServerId> = networks.iter().map(|n| n.id).collect();
+    for config in networks {
+        workspace.add_network(config, &mut out);
     }
-
-    let connection = connection::spawn(
-        runtime,
-        Config {
-            host: options.host.clone(),
-            port: options.port,
-            nick: options.nick.clone(),
-            username: options.nick.clone(),
-            realname: "Textual for Linux".into(),
-            channels: vec![options.channel.clone()],
-        },
-    );
-    let commands = connection.commands.clone();
-    let own_nick = Rc::new(RefCell::new(options.nick.clone()));
-    let stamp = {
-        let next = Rc::new(std::cell::Cell::new(0));
-        move || {
-            next.set(next.get() + 1);
-            Stamp {
-                id: LineId::new(next.get()),
-                at: Local::now(),
+    let mut view = View::build(app, style, tx.clone(), pages);
+    view.apply(&workspace, &out.changes);
+    let io = Io::new(runtime.clone(), tx.clone());
+    for server in servers {
+        let _ = tx.send(
+            Input::Network {
+                server,
+                input: NetInput::Connect,
             }
-        }
-    };
-
-    let print = {
-        let view = view.clone();
-        let style = style.clone();
-        move |line: Line| view.append(line.render(&style), &line.id.to_string())
-    };
-
-    {
-        let channel = options.channel.clone();
-        let own_nick = own_nick.clone();
-        let print = print.clone();
-        let stamp = stamp.clone();
-        entry.connect_activate(move |entry| {
-            let text = entry.text().to_string();
-            if text.is_empty() {
-                return;
-            }
-            entry.set_text("");
-            for part in text.lines().filter(|l| !l.is_empty()) {
-                let message = Message::new("PRIVMSG", &[&channel, part]);
-                if commands.send(Command::Send(message)).is_err() {
-                    return;
-                }
-                let mut line = Line::new(
-                    stamp(),
-                    LineType::Privmsg,
-                    "PRIVMSG",
-                    Some(&own_nick.borrow()),
-                    part.to_owned(),
-                );
-                line.from_self = true;
-                print(line);
-            }
-        });
+            .into(),
+        );
     }
-
-    let quitting = Rc::new(std::cell::Cell::new(false));
-    let channel = options.channel.clone();
-    let view = view.clone();
-    let mut events = connection.events;
-    let entry = entry.clone();
-    let window_for_events = window.clone();
-    let quitting_for_events = quitting.clone();
-    glib::spawn_future_local(async move {
-        while let Some(event) = events.recv().await {
-            match event {
-                Event::Connected => {}
-                Event::Refused { message, reason } => print(Line::new(
-                    stamp(),
-                    LineType::Debug,
-                    "-100",
-                    None,
-                    format!("Not sent ({reason}): {}", message.params.join(" ")),
-                )),
-                Event::Registered { nick } => {
-                    *own_nick.borrow_mut() = nick;
-                    entry.set_sensitive(true);
-                    entry.grab_focus();
-                }
-                Event::Message(message) => {
-                    let current = own_nick.borrow().clone();
-                    let (topic_channel, topic) = match message.command.as_str() {
-                        "331" => (1, Some("")),
-                        "332" => (1, message.param(2)),
-                        "TOPIC" => (0, message.param(1)),
-                        _ => (0, None),
-                    };
-                    if let Some(topic) = topic
-                        && message
-                            .param(topic_channel)
-                            .is_some_and(|c| c.eq_ignore_ascii_case(&channel))
-                    {
-                        view.set_topic(topic, &style);
-                    }
-                    if message.command == "NICK"
-                        && message
-                            .source()
-                            .is_some_and(|s| s.nick.eq_ignore_ascii_case(&current))
-                        && let Some(new) = message.param(0)
-                    {
-                        *own_nick.borrow_mut() = new.to_owned();
-                    }
-                    let Some((destination, line)) =
-                        Line::from_message(&message, &current, &Isupport::default(), stamp())
-                    else {
-                        continue;
-                    };
-                    let shown = match &destination {
-                        Destination::Channel(name) => name.eq_ignore_ascii_case(&channel),
-                        Destination::Nick(_) => true,
-                        Destination::Query(_) | Destination::Server => false,
-                    };
-                    if shown {
-                        print(line);
-                    }
-                }
-                Event::Disconnected(reason) => {
-                    entry.set_sensitive(false);
-                    if quitting_for_events.get() {
-                        window_for_events.destroy();
-                        return;
-                    }
-                    let text = match reason {
-                        Disconnect::UserQuit => "Disconnected from IRC".to_owned(),
-                        Disconnect::ServerClosed => {
-                            "Disconnected from IRC: the server closed the connection".to_owned()
-                        }
-                        Disconnect::Error(e) => format!("Disconnected from IRC: {e}"),
-                    };
-                    print(Line::client(stamp(), text));
-                }
-            }
-        }
-    });
-
-    // Closing sends QUIT and waits (up to QUIT_WAIT) for the connection to
-    // end, so the server sees a clean quit before the process exits.
-    let quit_commands = connection.commands;
-    window.connect_close_request(move |window| {
-        if quitting.replace(true) || quit_commands.send(Command::Quit(None)).is_err() {
-            return glib::Propagation::Proceed;
-        }
-        window.set_visible(false);
-        let window = window.clone();
-        glib::timeout_add_local_once(QUIT_WAIT, move || window.destroy());
-        glib::Propagation::Stop
-    });
-    window.present();
+    let probe_prefix = std::env::var_os("TEXTUAL_GTK_PROBE").map(PathBuf::from);
+    if let Some(prefix) = &probe_prefix {
+        probe::install(prefix.clone(), tx.clone());
+    }
+    glib::spawn_future_local(app::run(workspace, view, io, rx, probe_prefix));
 }
 
-/// For the end-to-end check: once a second, writes what the page shows to
-/// `<prefix>.json` and a snapshot to `<prefix>.png`. Creating
-/// `<prefix>.reload` reloads the page; `<prefix>.close` closes the window.
-fn install_probe(view: &ChatView, window: &adw::ApplicationWindow, prefix: PathBuf) {
-    const STATE: &str = "({\
-        lines: document.querySelectorAll('#messageBuffer > .line').length,\
-        last: (document.querySelector('#messageBuffer > .line:last-child') || {}).innerText || '',\
-        lastHtml: (document.querySelector('#messageBuffer > .line:last-child') || {}).innerHTML || '',\
-        bodyOpacity: getComputedStyle(document.getElementById('body')).opacity,\
-        topic: (document.getElementById('topicBar') || {}).innerText || '',\
-        loadedAt: performance.timeOrigin\
-    })";
-    let view = view.clone();
-    let window = window.clone();
-    glib::timeout_add_seconds_local(1, move || {
-        let trigger = |suffix: &str| std::fs::remove_file(prefix.with_extension(suffix)).is_ok();
-        if trigger("reload") {
-            webkit6::prelude::WebViewExt::reload(&view.widget());
-        }
-        if trigger("close") {
-            window.close();
-        }
-        let json_path = prefix.with_extension("json");
-        let png_path = prefix.with_extension("png");
-        view.query(STATE, move |state| {
-            if let Some(state) = state {
-                let _ = std::fs::write(&json_path, state);
-            }
-        });
-        webkit6::prelude::WebViewExt::snapshot(
-            &view.widget(),
-            webkit6::SnapshotRegion::Visible,
-            webkit6::SnapshotOptions::NONE,
-            None::<&gtk::gio::Cancellable>,
-            move |texture| {
-                if let Ok(texture) = texture {
-                    let _ = texture.save_to_png(&png_path);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Options, String> {
+        parse_options(args.iter().map(|a| (*a).to_owned()))
+    }
+
+    #[test]
+    fn a_network_spec_fills_the_config() {
+        let options = parse(&[
+            "--network",
+            "name=Local,host=127.0.0.1,nick=me,join=#a #b:key",
+            "--network",
+            "name=Secure,host=irc.example,tls=on,verify=false,nick=mes,user=u,realname=R",
+            "--style",
+            "Other",
+        ])
+        .unwrap();
+        assert_eq!(options.style, "Other");
+        let [local, secure] = options.networks.as_slice() else {
+            panic!("two networks");
+        };
+        assert_eq!(local.id, ServerId(1));
+        assert_eq!(local.name, "Local");
+        assert_eq!(local.addresses[0].port, 6667);
+        assert_eq!(local.tls, Tls::Off);
+        assert_eq!(local.setup.nick, "me");
+        assert_eq!(local.setup.username, "me");
+        assert_eq!(local.setup.realname, "Textual GTK");
+        assert_eq!(
+            local.autojoin,
+            [
+                ChannelConfig {
+                    name: "#a".into(),
+                    key: None
+                },
+                ChannelConfig {
+                    name: "#b".into(),
+                    key: Some("key".into())
                 }
-            },
+            ]
         );
-        glib::ControlFlow::Continue
-    });
+        assert_eq!(secure.id, ServerId(2));
+        assert_eq!(secure.addresses[0].port, 6697);
+        assert_eq!(secure.tls, Tls::On { verify: false });
+        assert_eq!(secure.setup.username, "u");
+        assert_eq!(secure.setup.realname, "R");
+        assert!(secure.autojoin.is_empty());
+    }
+
+    #[test]
+    fn bad_specs_are_refused() {
+        assert!(parse(&[]).unwrap_err().starts_with("usage:"));
+        assert!(parse(&["--network", "host=h,nick=n"]).is_err(), "no name");
+        assert!(parse(&["--network", "name=a,host=h"]).is_err(), "no nick");
+        assert!(
+            parse(&["--network", "name=a,host=h,nick=n,tls=maybe"]).is_err(),
+            "bad tls"
+        );
+        assert!(
+            parse(&["--network", "name=a,host=h,nick=n,port=x"]).is_err(),
+            "bad port"
+        );
+        let twice = parse(&[
+            "--network",
+            "name=a,host=h,nick=n",
+            "--network",
+            "name=a,host=h2,nick=n",
+        ]);
+        assert_eq!(twice.unwrap_err(), "two networks are named a");
+    }
 }

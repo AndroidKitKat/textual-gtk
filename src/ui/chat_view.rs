@@ -1,8 +1,9 @@
-//! A channel's message view: a WebKitGTK page built from the style's
-//! `baseLayout`, driven through Textual's own JavaScript API.
+//! A buffer's message view: a WebKitGTK page built from the style's
+//! `baseLayout`, driven through Textual's own JavaScript API. It keeps no
+//! lines of its own: after a load or a crash it asks the view to refill it
+//! from the model's scrollback.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -62,9 +63,6 @@ const HANDLERS: &[&str] = &[
     "finishedLayingOutView",
 ];
 
-/// Textual's hard scrollback limit (`messageBuffer.js`). The view keeps
-/// this many lines so it can rebuild the page after a reload or a crash.
-const KEPT_LINES: usize = 1000;
 /// More web-process crashes than this within the window and the view
 /// stops reloading.
 const MAX_CRASHES: usize = 3;
@@ -74,11 +72,13 @@ struct Inner {
     view: WebView,
     page_uri: String,
     channel: String,
-    /// Whether the current page has finished Textual's load handshake.
-    /// Calls made before then are dropped by Textual's JS, so they wait.
+    style: Rc<Style>,
+    /// Whether the page has been filled since it last loaded. Calls made
+    /// before then are dropped by Textual's JS, and the model holds the
+    /// lines anyway, so `append` and `set_topic` wait for `fill`.
     ready: bool,
-    lines: VecDeque<(String, String)>,
-    topic: Option<(String, String)>,
+    /// The page finished loading and wants its lines back.
+    needs_replay: bool,
     /// When the web process last ended, to stop reloading a page that
     /// crashes every time.
     crashes: Vec<std::time::Instant>,
@@ -93,14 +93,30 @@ impl Inner {
         )
     }
 
-    fn topic_script((plain, html): &(String, String)) -> String {
-        format!("Textual.setTopicBarValue({}, {});", json(plain), json(html))
+    fn topic_script(&self, topic: &str) -> String {
+        let fragment = |ctx: &textual_core::style::template::Value| {
+            self.style
+                .render("formattedMessageFragment", ctx)
+                .unwrap_or_default()
+        };
+        // Textual's wording for a channel without a topic (TVCMainWindow[vi3-23]).
+        let topic = if topic.is_empty() {
+            "(No Topic)"
+        } else {
+            topic
+        };
+        let html = textual_core::style::body::render(topic, false, &fragment);
+        let plain: String = topic.chars().filter(|c| *c >= ' ').collect();
+        format!(
+            "Textual.setTopicBarValue({}, {});",
+            json(&plain),
+            json(&html)
+        )
     }
 
     /// Textual's `logViewWebViewFinishedLoading`: set up auto-scroll and the
-    /// view, then put back everything the page should show.
+    /// view, then wait for the model's lines.
     fn page_ready(&mut self) {
-        self.ready = true;
         evaluate(
             &self.view,
             &format!(
@@ -111,12 +127,7 @@ impl Inner {
                 json(&self.channel)
             ),
         );
-        if let Some(topic) = &self.topic {
-            evaluate(&self.view, &Self::topic_script(topic));
-        }
-        for line in &self.lines {
-            evaluate(&self.view, &Self::append_script(line));
-        }
+        self.needs_replay = true;
     }
 }
 
@@ -134,18 +145,29 @@ pub fn prepare_web_context(resources: &Path, pages: &Path) {
 }
 
 impl ChatView {
-    pub fn new(style: &Style, channel: &str, pages: &Path) -> Self {
+    /// `related` shares its web process; `on_ready` runs when the page has
+    /// loaded and `needs_replay` is set.
+    pub fn new(
+        style: Rc<Style>,
+        channel: &str,
+        pages: &Path,
+        related: Option<&WebView>,
+        on_ready: impl Fn() + 'static,
+    ) -> Self {
         let settings = Settings::new();
         settings.set_enable_developer_extras(std::env::var_os("TEXTUAL_GTK_DEVTOOLS").is_some());
         settings.set_enable_back_forward_navigation_gestures(false);
 
         let content = UserContentManager::new();
-        let view = WebView::builder()
+        let mut builder = WebView::builder()
             .settings(&settings)
             .user_content_manager(&content)
             .hexpand(true)
-            .vexpand(true)
-            .build();
+            .vexpand(true);
+        if let Some(related) = related {
+            builder = builder.related_view(related);
+        }
+        let view = builder.build();
 
         let page_uri = match write_page(
             pages,
@@ -165,19 +187,22 @@ impl ChatView {
                 view: view.clone(),
                 page_uri: page_uri.clone(),
                 channel: channel.to_owned(),
+                style,
                 ready: false,
-                lines: VecDeque::new(),
-                topic: None,
+                needs_replay: false,
                 crashes: Vec::new(),
             })),
         };
 
+        let on_ready = Rc::new(on_ready);
         for &name in HANDLERS {
             let weak = Rc::downgrade(&chat.inner);
+            let on_ready = on_ready.clone();
             content.connect_script_message_received(Some(name), move |_, value| {
                 let Some(inner) = weak.upgrade() else { return };
                 if name == "finishedLayingOutView" {
                     inner.borrow_mut().page_ready();
+                    on_ready();
                 }
                 answer_promise(&inner.borrow().view, value);
             });
@@ -232,40 +257,43 @@ impl ChatView {
         self.inner.borrow().view.clone()
     }
 
-    /// Appends one rendered line (see `Line::render`).
-    pub fn append(&self, html: String, line_id: &str) {
+    pub fn reload(&self) {
+        self.inner.borrow().view.reload();
+    }
+
+    pub fn needs_replay(&self) -> bool {
+        self.inner.borrow().needs_replay
+    }
+
+    /// Puts the model's topic and lines into a freshly loaded page, after
+    /// which `append` and `set_topic` reach it directly.
+    pub fn fill(&self, topic: &str, lines: impl Iterator<Item = (String, String)>) {
         let mut inner = self.inner.borrow_mut();
-        let line = (html, line_id.to_owned());
-        if inner.ready {
+        evaluate(&inner.view, &inner.topic_script(topic));
+        for line in lines {
             evaluate(&inner.view, &Inner::append_script(&line));
         }
-        inner.lines.push_back(line);
-        if inner.lines.len() > KEPT_LINES {
-            inner.lines.pop_front();
+        inner.ready = true;
+        inner.needs_replay = false;
+    }
+
+    /// Appends one rendered line (see `Line::render`).
+    pub fn append(&self, html: String, line_id: &str) {
+        let inner = self.inner.borrow();
+        if inner.ready {
+            evaluate(
+                &inner.view,
+                &Inner::append_script(&(html, line_id.to_owned())),
+            );
         }
     }
 
     /// Shows `topic` (IRC formatting allowed) in the style's topic bar.
-    pub fn set_topic(&self, topic: &str, style: &Style) {
-        let fragment = |ctx: &textual_core::style::template::Value| {
-            style
-                .render("formattedMessageFragment", ctx)
-                .unwrap_or_default()
-        };
-        // Textual's wording for a channel without a topic (TVCMainWindow[vi3-23]).
-        let topic = if topic.is_empty() {
-            "(No Topic)"
-        } else {
-            topic
-        };
-        let html = textual_core::style::body::render(topic, false, &fragment);
-        let plain: String = topic.chars().filter(|c| *c >= ' ').collect();
-        let mut inner = self.inner.borrow_mut();
-        let topic = (plain, html);
+    pub fn set_topic(&self, topic: &str) {
+        let inner = self.inner.borrow();
         if inner.ready {
-            evaluate(&inner.view, &Inner::topic_script(&topic));
+            evaluate(&inner.view, &inner.topic_script(topic));
         }
-        inner.topic = Some(topic);
     }
 
     /// Runs `expression` in the page and hands its JSON result to `done`.
