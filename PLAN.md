@@ -68,7 +68,7 @@ Written 2026-11-05 from the conversation in which Michael proposed the project.
   - `src/style`: style loading, the template engine, and IRC formatting to HTML.
   - `src/line.rs`: messages to Textual log lines (wording, nick colours, timestamps).
   - `src/ui/chat_view.rs`: the WebKit view and Textual's JS handshake.
-- **Deferred from phase 1 to phase 2:** outgoing line length limits and splitting, PING idle timeout, registration failures other than 433, NAMES/member tracking (QUIT and NICK lines currently show in the one channel regardless), links, channel and nick tagging in bodies.
+- **Deferred from phase 1 to phase 2:** outgoing line length limits and splitting, PING idle timeout, registration failures other than 433, NAMES/member tracking (QUIT and NICK lines currently show in the one channel regardless), links, channel and nick tagging in bodies. Also: show a visible notice (not only stderr) when the view gives up after repeated web-process crashes, and echo a sent line only after the connection accepts it.
 - **Next:** phase 2. Start with an architect pass on the client model (servers, channels, members, views), since that is the one-way door.
 
 ## Open decisions (Michael)

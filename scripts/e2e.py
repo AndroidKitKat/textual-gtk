@@ -184,7 +184,10 @@ def main():
         web = [pid for pid, comm in descendants(app.pid) if comm.startswith("WebKitWebProces")]
         checks["found this run's web process"] = len(web) == 1
         for pid in web:
-            os.kill(pid, signal.SIGKILL)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         talker.send(f"PRIVMSG {channel} :while it was down {token}")
         recovered = probe.wait_until(
             lambda s: s["loadedAt"] != after["loadedAt"] and f"while it was down {token}" in s["last"],
