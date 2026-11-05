@@ -193,7 +193,7 @@ impl View {
             self.sidebar.select(ws, id);
         }
         for (id, chat) in &self.chats {
-            if chat.needs_replay() {
+            if chat.wants_fill() {
                 let lines = ws
                     .buffer(*id)
                     .map(|(_, b)| b.scrollback().lines().cloned().collect::<Vec<_>>())

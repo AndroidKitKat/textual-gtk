@@ -77,12 +77,7 @@ struct Inner {
     /// Only a channel's page has one.
     topic_bar: bool,
     style: Rc<Style>,
-    /// Whether the page has been filled since it last loaded. Calls made
-    /// before then are dropped by Textual's JS, and the model holds the
-    /// lines anyway, so `append` and `set_topic` wait for `fill`.
-    ready: bool,
-    /// The page finished loading and wants its lines back.
-    needs_replay: bool,
+    page: Page,
     /// When the web process last ended, to stop reloading a page that
     /// crashes every time.
     crashes: Vec<std::time::Instant>,
@@ -135,7 +130,46 @@ impl Inner {
                 name = self.name.as_deref().map_or("null".to_owned(), json)
             ),
         );
-        self.needs_replay = true;
+        self.page.laid_out();
+    }
+}
+
+/// Where the page is between loading and taking lines. Calls made before
+/// it is `Filled` are dropped by Textual's JS, and the model holds the
+/// lines anyway, so `append` and `set_topic` wait for `fill`. One state,
+/// so a load that starts while a fill is pending cancels it: the fill only
+/// ever goes into the page that laid out since the last load began.
+#[derive(Debug, Default, PartialEq, Eq)]
+enum Page {
+    #[default]
+    Loading,
+    /// Textual's `finishedLayingOutView` came; the page wants its lines.
+    LaidOut,
+    Filled,
+}
+
+impl Page {
+    /// A load (first, reload or after a crash) began.
+    fn started(&mut self) {
+        *self = Page::Loading;
+    }
+
+    fn laid_out(&mut self) {
+        if *self == Page::Loading {
+            *self = Page::LaidOut;
+        }
+    }
+
+    fn wants_fill(&self) -> bool {
+        *self == Page::LaidOut
+    }
+
+    fn filled(&mut self) {
+        *self = Page::Filled;
+    }
+
+    fn is_ready(&self) -> bool {
+        *self == Page::Filled
     }
 }
 
@@ -154,7 +188,7 @@ pub fn prepare_web_context(resources: &Path, pages: &Path) {
 
 impl ChatView {
     /// `related` shares its web process; `on_ready` runs when the page has
-    /// loaded and `needs_replay` is set.
+    /// laid out and wants its lines (`wants_fill`).
     pub fn new(
         style: Rc<Style>,
         kind: ViewKind,
@@ -198,8 +232,7 @@ impl ChatView {
                 name: kind.name().map(str::to_owned),
                 topic_bar: matches!(kind, ViewKind::Channel(_)),
                 style,
-                ready: false,
-                needs_replay: false,
+                page: Page::default(),
                 crashes: Vec::new(),
             })),
         };
@@ -231,7 +264,7 @@ impl ChatView {
         view.connect_web_process_terminated(move |view, reason| {
             let Some(inner) = weak.upgrade() else { return };
             let mut inner = inner.borrow_mut();
-            inner.ready = false;
+            inner.page.started();
             let now = std::time::Instant::now();
             inner
                 .crashes
@@ -252,7 +285,7 @@ impl ChatView {
                 if event == LoadEvent::Started
                     && let Some(inner) = weak.upgrade()
                 {
-                    inner.borrow_mut().ready = false;
+                    inner.borrow_mut().page.started();
                 }
             }
         });
@@ -271,8 +304,8 @@ impl ChatView {
         self.inner.borrow().view.reload();
     }
 
-    pub fn needs_replay(&self) -> bool {
-        self.inner.borrow().needs_replay
+    pub fn wants_fill(&self) -> bool {
+        self.inner.borrow().page.wants_fill()
     }
 
     /// Puts the model's topic and lines into a freshly loaded page, after
@@ -285,14 +318,13 @@ impl ChatView {
         for line in lines {
             evaluate(&inner.view, &Inner::append_script(&line));
         }
-        inner.ready = true;
-        inner.needs_replay = false;
+        inner.page.filled();
     }
 
     /// Appends one rendered line (see `Line::render`).
     pub fn append(&self, html: String, line_id: &str) {
         let inner = self.inner.borrow();
-        if inner.ready {
+        if inner.page.is_ready() {
             evaluate(
                 &inner.view,
                 &Inner::append_script(&(html, line_id.to_owned())),
@@ -303,7 +335,7 @@ impl ChatView {
     /// Shows `topic` (IRC formatting allowed) in the style's topic bar.
     pub fn set_topic(&self, topic: &str) {
         let inner = self.inner.borrow();
-        if inner.ready
+        if inner.page.is_ready()
             && let Some(script) = inner.topic_script(topic)
         {
             evaluate(&inner.view, &script);
@@ -406,4 +438,42 @@ fn write_page(dir: &Path, html: &str) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("{}.html", glib::uuid_string_random()));
     std::fs::write(&path, html)?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Page;
+
+    #[test]
+    fn a_page_takes_one_fill_after_it_laid_out() {
+        let mut page = Page::default();
+        page.started();
+        assert!(!page.wants_fill() && !page.is_ready());
+        page.laid_out();
+        assert!(page.wants_fill() && !page.is_ready());
+        page.filled();
+        assert!(!page.wants_fill() && page.is_ready());
+    }
+
+    #[test]
+    fn a_reload_between_layout_and_fill_waits_for_the_new_page() {
+        let mut page = Page::default();
+        page.started();
+        page.laid_out();
+        page.started();
+        assert!(!page.wants_fill(), "the loading page must not be filled");
+        assert!(!page.is_ready());
+        page.laid_out();
+        assert!(page.wants_fill());
+    }
+
+    #[test]
+    fn a_reload_after_the_fill_stops_appends_until_the_next_fill() {
+        let mut page = Page::default();
+        page.started();
+        page.laid_out();
+        page.filled();
+        page.started();
+        assert!(!page.is_ready() && !page.wants_fill());
+    }
 }
