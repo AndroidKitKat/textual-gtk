@@ -3,6 +3,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# The core crate must stay free of GUI and async crates so the model is
+# testable without a window (docs/design/phase2.md, "Crates").
+forbidden=$(cargo tree -p textual-core -e normal --prefix none | tail -n +2 |
+  grep -Eo '^(gtk4|libadwaita|glib|gio|gdk4|webkit6|javascriptcore6|tokio) ' | sort -u || true)
+if [[ -n "$forbidden" ]]; then
+  echo "textual-core must not depend on: $forbidden" >&2
+  exit 1
+fi

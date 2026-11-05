@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use textual_gtk::style::template::{Template, Value};
+use textual_core::style::template::{Template, Value};
 
 fn templates_under(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -14,7 +14,7 @@ fn templates_under(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn styling() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/styling")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/styling")
 }
 
 #[test]

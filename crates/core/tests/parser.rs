@@ -1,4 +1,4 @@
-use textual_gtk::irc::{Message, Source, WireError};
+use textual_core::irc::{Message, Source, WireError};
 use yaml_rust2::{Yaml, YamlLoader};
 
 fn load(name: &str) -> Vec<Yaml> {

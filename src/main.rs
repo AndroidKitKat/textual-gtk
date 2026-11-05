@@ -4,10 +4,10 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
-use textual_gtk::irc::Message;
+use textual_core::irc::Message;
+use textual_core::line::{Destination, Line, LineType};
+use textual_core::style::{Appearance, Style};
 use textual_gtk::irc::connection::{self, Command, Config, Disconnect, Event};
-use textual_gtk::line::{Destination, Line, LineType};
-use textual_gtk::style::{Appearance, Style};
 use textual_gtk::ui::chat_view::{self, ChatView};
 
 const APP_ID: &str = "io.github.androidkitkat.TextualGtk";

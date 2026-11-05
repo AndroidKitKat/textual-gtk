@@ -13,7 +13,7 @@ use webkit6::{
     UserContentManager, WebContext, WebView,
 };
 
-use crate::style::{Font, Style};
+use textual_core::style::{Font, Style};
 
 /// The 40 handlers Textual registers (`TVCLogViewInternalWK2.m:95-134`).
 /// Simplified needs only `finishedLayingOutView` and the two line
@@ -247,7 +247,7 @@ impl ChatView {
 
     /// Shows `topic` (IRC formatting allowed) in the style's topic bar.
     pub fn set_topic(&self, topic: &str, style: &Style) {
-        let fragment = |ctx: &crate::style::template::Value| {
+        let fragment = |ctx: &textual_core::style::template::Value| {
             style
                 .render("formattedMessageFragment", ctx)
                 .unwrap_or_default()
@@ -258,7 +258,7 @@ impl ChatView {
         } else {
             topic
         };
-        let html = crate::style::body::render(topic, false, &fragment);
+        let html = textual_core::style::body::render(topic, false, &fragment);
         let plain: String = topic.chars().filter(|c| *c >= ' ').collect();
         let mut inner = self.inner.borrow_mut();
         let topic = (plain, html);

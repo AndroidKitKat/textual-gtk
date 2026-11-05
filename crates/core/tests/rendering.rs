@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use textual_gtk::irc::Message;
-use textual_gtk::line::Line;
-use textual_gtk::style::{Appearance, Font, Style};
+use textual_core::irc::Message;
+use textual_core::line::Line;
+use textual_core::style::{Appearance, Font, Style};
 
 fn resources() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/styling")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/styling")
 }
 
 fn simplified() -> Style {
@@ -34,7 +34,7 @@ fn loads_every_bundled_style_in_both_appearances() {
                 Style::load(&resources(), name, want).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(!style.css_files.is_empty(), "{name} has no CSS");
             let html = Line::new(
-                textual_gtk::line::LineType::Privmsg,
+                textual_core::line::LineType::Privmsg,
                 "PRIVMSG",
                 Some("a"),
                 "b".into(),
@@ -102,7 +102,7 @@ fn the_initial_document_loads_the_style_and_textual_js() {
         points: 12.0,
     };
     let html = style.initial_document("#textual", &font, "42");
-    let css = textual_gtk::style::file_url(&style.css_files[0]);
+    let css = textual_core::style::file_url(&style.css_files[0]);
     assert!(
         css.starts_with("file:///") && css.contains("Bundled%20Styles"),
         "{css}"

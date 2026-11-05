@@ -1,7 +1,7 @@
 use std::time::Duration;
 
+use textual_core::irc::{Message, WireError};
 use textual_gtk::irc::connection::{self, Command, Config, Disconnect, Event};
-use textual_gtk::irc::{Message, WireError};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};

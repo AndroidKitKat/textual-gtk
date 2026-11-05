@@ -1,0 +1,15 @@
+[package]
+name = "textual-core"
+version = "0.1.0"
+edition = "2024"
+description = "The IRC protocol, model and style rendering for Textual GTK, with no GUI or async runtime."
+
+# This crate must not depend on gtk, adw, glib, gio, webkit6 or tokio:
+# keeping them out is what keeps the model testable without a window.
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+md-5 = "0.11.0"
+plist = "1.10.3"
+
+[dev-dependencies]
+yaml-rust2 = "0.13.0"

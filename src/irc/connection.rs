@@ -6,7 +6,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until, timeout};
 
-use super::{Message, WireError};
+use textual_core::irc::{Message, WireError};
 
 /// Longest line accepted from the server: 8191 bytes of tags plus a 512-byte
 /// body, per the IRCv3 message-tags spec, plus the CRLF.
