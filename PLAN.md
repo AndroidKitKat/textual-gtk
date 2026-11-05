@@ -73,7 +73,6 @@ Written 2026-11-05 from the conversation in which Michael proposed the project.
 
 ## Open decisions (Michael)
 
-- **Name.** "textual-gtk" is a working name. "Textual" belongs to the upstream project.
 - **OTR:** keep it (via libotr) or drop it?
 - **How faithful:** copy macOS layout details literally, or adapt them to GNOME's HIG? The default is to keep Textual's structure and behaviour and use libadwaita's idiom.
 

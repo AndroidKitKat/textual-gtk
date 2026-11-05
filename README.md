@@ -1,4 +1,4 @@
-# textual-gtk
+# Textual GTK
 
 A Linux rebuild of the macOS IRC client [Textual](https://github.com/Codeux-Software/Textual) in Rust with GTK 4, libadwaita and WebKitGTK 6.0. Work in progress; see `PLAN.md`.
 

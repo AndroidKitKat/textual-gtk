@@ -155,7 +155,7 @@ fn build_window(
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("Textual")
+        .title("Textual GTK")
         .default_width(900)
         .default_height(600)
         .content(&toolbar)
