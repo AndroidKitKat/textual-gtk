@@ -20,7 +20,7 @@ const UNDERLINE: char = '\x1F';
 const HIGHEST_COLOR_DIGIT: u8 = 98;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Color {
+pub(crate) enum Color {
     /// An mIRC colour number, styled by `baseLayout.css`.
     Digit(u8),
     /// `rrggbb`, set inline.
@@ -37,7 +37,7 @@ impl Color {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Effects {
+pub(crate) struct Effects {
     bold: bool,
     italic: bool,
     monospace: bool,
@@ -48,12 +48,12 @@ struct Effects {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Run {
-    text: String,
-    effects: Effects,
+pub(crate) struct Run {
+    pub(crate) text: String,
+    pub(crate) effects: Effects,
 }
 
-fn parse_runs(body: &str) -> Vec<Run> {
+pub(crate) fn parse_runs(body: &str) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     let mut effects = Effects::default();
     let mut chars = body.chars().peekable();
