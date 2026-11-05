@@ -21,7 +21,10 @@ fi
 # Setting a widget's class list replaces the classes GTK and libadwaita
 # put there (a window's `background`, a box's `horizontal`), which left the
 # header bar transparent once. Add classes one by one instead.
-if replaced=$(grep -rnE '\.css_classes\([^)]|set_css_classes|"css-classes"' src/); then
+# Perl reads each file whole, so a call whose arguments start on the next
+# line (rustfmt's shape for long lists) is caught too.
+if replaced=$(find src -name '*.rs' -print0 | xargs -0 perl -0777 -ne \
+    'print "$ARGV\n" if /\.css_classes\s*\(\s*[^)\s]|set_css_classes|"css-classes"/'); [[ -n "$replaced" ]]; then
   echo "$replaced" >&2
   echo "use add_css_class, or Bound::classes for a row's classes, instead of replacing the class list" >&2
   exit 1
