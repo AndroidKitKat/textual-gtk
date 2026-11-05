@@ -32,6 +32,9 @@ impl Io {
     }
 
     pub fn execute(&mut self, effects: Vec<(ServerId, Effect)>) {
+        // A link the server closed gets no Hangup, so its handle is dropped
+        // here once the task has ended.
+        self.connections.retain(|_, c| !c.is_finished());
         for (server, effect) in effects {
             match effect {
                 Effect::Dial { conn, address, tls } => {

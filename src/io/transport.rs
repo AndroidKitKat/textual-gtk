@@ -81,6 +81,11 @@ impl Connection {
     }
 
     pub fn hangup(self) {}
+
+    /// Whether the task has ended, so the handle only holds a dead socket.
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
 }
 
 impl Drop for Connection {
