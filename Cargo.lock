@@ -1493,6 +1493,7 @@ dependencies = [
 name = "textual-gtk"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "gtk4",
  "libadwaita",
  "rcgen",

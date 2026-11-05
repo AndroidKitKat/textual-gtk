@@ -2,12 +2,14 @@
 //! IRC message and rendered through the style's line template.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fmt;
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeZone};
 use md5::{Digest, Md5};
 
-use crate::irc::Message;
+use crate::irc::casemap::CaseMapping;
+use crate::irc::isupport::Isupport;
+use crate::irc::{Message, Source};
 use crate::style::template::Value;
 use crate::style::{NicknameColors, Style, body};
 
@@ -16,6 +18,8 @@ const DEFAULT_TIMESTAMP_FORMAT: &str = "[%H:%M:%S]";
 /// `\x0F`, which Textual appends to user-supplied text inside its own
 /// formatted strings so that text's formatting cannot leak out.
 const STOP: &str = "\x0F";
+/// Textual's long date style: "November 5, 2026 at 5:49:09 PM".
+const LONG_DATE: &str = "%B %-d, %Y at %-I:%M:%S %p";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineType {
@@ -52,7 +56,7 @@ impl LineType {
     /// Spoken lines render through `newMessagePostedWithSender`, events
     /// through `newMessagePostedWithoutSender` (Textual's
     /// `TemplateLineTypes.plist`).
-    fn is_spoken(self) -> bool {
+    pub fn is_spoken(self) -> bool {
         matches!(
             self,
             LineType::Privmsg | LineType::Action | LineType::Notice
@@ -60,12 +64,38 @@ impl LineType {
     }
 }
 
+/// A line's identity within one workspace. Assigned in order, so two runs
+/// of one script give the same ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LineId(u64);
+
+impl LineId {
+    pub const fn new(n: u64) -> Self {
+        LineId(n)
+    }
+}
+
+impl fmt::Display for LineId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// What the caller supplies for every new line. The core never reads the
+/// clock or a global counter, so two runs of one script print equal lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    pub id: LineId,
+    pub at: DateTime<Local>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
-    pub id: String,
+    pub id: LineId,
     pub received_at: DateTime<Local>,
     pub kind: LineType,
-    /// The IRC command or numeric the line came from.
+    /// The IRC command or numeric the line came from; `CLIENT_COMMAND` for
+    /// what the client says itself.
     pub command: String,
     /// Who spoke, for spoken lines.
     pub nickname: Option<String>,
@@ -73,47 +103,68 @@ pub struct Line {
     /// Body text, still carrying IRC formatting codes.
     pub body: String,
     pub highlight: bool,
+    /// The server's `msgid` tag, which identifies a message delivered twice.
+    pub msgid: Option<String>,
 }
 
-/// Where a line belongs.
+/// The command of a line the client says itself (Textual's
+/// `TVCLogLineDefaultCommandValue`).
+pub const CLIENT_COMMAND: &str = "-100";
+
+/// What kind of buffer a line belongs in. The session turns this into
+/// buffers using what it knows about membership.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Destination {
     Channel(String),
-    /// Every channel this nick shares with us (QUIT and NICK).
-    ChannelsOf(String),
+    /// A private conversation with this nick.
+    Query(String),
+    /// Every buffer this nick is in: shared channels and its query (QUIT,
+    /// NICK).
+    Nick(String),
     Server,
 }
 
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Unique within the process, shaped like Textual's 17-character ids.
-fn next_id() -> String {
-    let n = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    format!("{:04X}-{:012X}", std::process::id() & 0xFFFF, n)
-}
-
 impl Line {
-    pub fn new(kind: LineType, command: &str, nickname: Option<&str>, body: String) -> Self {
+    pub fn new(
+        stamp: Stamp,
+        kind: LineType,
+        command: &str,
+        nickname: Option<&str>,
+        body: String,
+    ) -> Self {
         Line {
-            id: next_id(),
-            received_at: Local::now(),
+            id: stamp.id,
+            received_at: stamp.at,
             kind,
             command: command.to_owned(),
             nickname: nickname.map(str::to_owned),
             from_self: false,
             body,
             highlight: false,
+            msgid: None,
         }
     }
 
+    /// A line the client says itself, such as a connection notice.
+    pub fn client(stamp: Stamp, text: String) -> Self {
+        Line::new(stamp, LineType::Debug, CLIENT_COMMAND, None, text)
+    }
+
     /// The line a server message prints, or `None` for messages that print
-    /// nothing yet.
-    pub fn from_message(message: &Message, own_nick: &str) -> Option<(Destination, Line)> {
+    /// nothing. `me` is our nick, compared under the server's casemap.
+    pub fn from_message(
+        message: &Message,
+        me: &str,
+        isupport: &Isupport,
+        stamp: Stamp,
+    ) -> Option<(Destination, Line)> {
+        let casemap = isupport.casemapping;
         let source = message.source();
         let nick = source.map_or("", |s| s.nick);
         let user = source.and_then(|s| s.user).unwrap_or("");
         let host = source.and_then(|s| s.host).unwrap_or("");
         let param = |i| message.param(i).unwrap_or("");
+        let params_from = |i| message.params.get(i..).unwrap_or_default().join(" ");
         let reason = |i| {
             message
                 .param(i)
@@ -121,19 +172,13 @@ impl Line {
                 .map(|r| format!(" ({r}{STOP})"))
                 .unwrap_or_default()
         };
-        let mine = nick.eq_ignore_ascii_case(own_nick);
-        let channel = || Destination::Channel(param(0).to_owned());
+        let mine = !nick.is_empty() && casemap.same_nick(nick, me);
+        let channel = |i| Destination::Channel(param(i).to_owned());
+        let event = |kind, body| Line::new(stamp, kind, &message.command, None, body);
 
         let (destination, mut line) = match message.command.as_str() {
             "PRIVMSG" | "NOTICE" => {
-                // STATUSMSG (`@#chan`) goes to the channel itself; `+chan`
-                // is a channel in its own right.
-                let stripped = param(0).trim_start_matches(['@', '+', '%', '~']);
-                let target = if stripped.starts_with(['#', '&', '!']) {
-                    stripped
-                } else {
-                    param(0)
-                };
+                let (_, target) = isupport.split_statusmsg(param(0));
                 let text = param(1);
                 let ctcp = text
                     .strip_prefix('\x01')
@@ -150,33 +195,31 @@ impl Line {
                     None => (LineType::Privmsg, text),
                 };
                 let from_server = source.is_none_or(|s| s.user.is_none() && s.host.is_none());
-                let destination = if target.starts_with(['#', '&', '!', '+']) {
+                let destination = if isupport.is_channel(target) {
                     Destination::Channel(target.to_owned())
                 } else if from_server {
                     Destination::Server
                 } else if mine {
-                    Destination::Channel(target.to_owned())
+                    Destination::Query(target.to_owned())
                 } else {
-                    Destination::Channel(nick.to_owned())
+                    Destination::Query(nick.to_owned())
                 };
                 let speaker = (!nick.is_empty()).then_some(nick);
-                let mut line = Line::new(kind, &message.command, speaker, text.to_owned());
-                line.highlight = !mine && mentions(text, own_nick);
+                let mut line = Line::new(stamp, kind, &message.command, speaker, text.to_owned());
+                line.highlight = !mine && mentions(text, me, casemap);
                 (destination, line)
             }
             "JOIN" => (
-                channel(),
+                channel(0),
                 event(
                     LineType::Join,
-                    message,
                     format!("\x02{nick}\x02 ({user}@{host}{STOP}) joined the channel"),
                 ),
             ),
             "PART" => (
-                channel(),
+                channel(0),
                 event(
                     LineType::Part,
-                    message,
                     format!(
                         "\x02{nick}\x02 ({user}@{host}{STOP}) left the channel{}",
                         reason(1)
@@ -184,18 +227,16 @@ impl Line {
                 ),
             ),
             "QUIT" => (
-                Destination::ChannelsOf(nick.to_owned()),
+                Destination::Nick(nick.to_owned()),
                 event(
                     LineType::Quit,
-                    message,
                     format!("\x02{nick}\x02 ({user}@{host}{STOP}) left IRC{}", reason(0)),
                 ),
             ),
             "KICK" => (
-                channel(),
+                channel(0),
                 event(
                     LineType::Kick,
-                    message,
                     format!(
                         "\x02{nick}\x02 kicked \x02{}\x02 from the channel ({}{STOP})",
                         param(1),
@@ -210,36 +251,84 @@ impl Line {
                     format!("{nick} is now known as \x02{}\x02", param(0))
                 };
                 (
-                    Destination::ChannelsOf(nick.to_owned()),
-                    event(LineType::Nick, message, text),
+                    Destination::Nick(nick.to_owned()),
+                    event(LineType::Nick, text),
                 )
             }
             "TOPIC" => (
-                channel(),
+                channel(0),
                 event(
                     LineType::Topic,
-                    message,
                     format!(
                         "\x02{nick}\x02 changed the topic to \x02{}{STOP}\x02",
                         param(1)
                     ),
                 ),
             ),
-            "MODE" if param(0).starts_with(['#', '&', '!', '+']) => {
-                let modes = message.params[1..].join(" ");
+            "MODE" => {
+                let destination = if isupport.is_channel(param(0)) {
+                    channel(0)
+                } else {
+                    Destination::Server
+                };
+                let text = format!("\x02{nick}\x02 sets mode \x02{}\x02", params_from(1));
+                (destination, event(LineType::Mode, text))
+            }
+            "332" => (
+                channel(1),
+                event(
+                    LineType::Topic,
+                    format!("Topic is \x02{}{STOP}\x02", param(2)),
+                ),
+            ),
+            "333" => {
+                let setter = Source::parse(param(2)).nick;
+                let at = param(3)
+                    .parse()
+                    .ok()
+                    .and_then(|secs| Local.timestamp_opt(secs, 0).single())
+                    .map_or_else(|| param(3).to_owned(), |t| t.format(LONG_DATE).to_string());
                 (
-                    channel(),
-                    event(
-                        LineType::Mode,
-                        message,
-                        format!("\x02{nick}\x02 sets mode \x02{modes}\x02"),
-                    ),
+                    channel(1),
+                    event(LineType::Topic, format!("Set by \x02{setter}\x02 on {at}")),
                 )
+            }
+            "324" => (
+                channel(1),
+                event(
+                    LineType::Mode,
+                    format!("Mode is \x02{}\x02", params_from(2)),
+                ),
+            ),
+            numeric if is_numeric(numeric) => {
+                let n: u16 = numeric.parse().expect("three digits");
+                // Textual's error range (`receiveErrorNumericReply`), less
+                // ERR_NOMOTD.
+                let body = if (401..597).contains(&n) && n != 422 {
+                    format!("Message({n}): {}", params_from(1))
+                } else {
+                    params_from(1)
+                };
+                (Destination::Server, event(LineType::Debug, body))
             }
             _ => return None,
         };
         line.from_self = mine;
+        line.msgid = message.tag("msgid").map(str::to_owned);
         Some((destination, line))
+    }
+
+    /// The text a reader sees, without formatting: `<nick> text` for a
+    /// message, `* nick text` for an action, `-nick- text` for a notice, and
+    /// the body alone for an event.
+    pub fn plain_text(&self) -> String {
+        let body = body::strip(&self.body);
+        match (&self.nickname, self.kind) {
+            (Some(nick), LineType::Privmsg) => format!("<{nick}> {body}"),
+            (Some(nick), LineType::Action) => format!("* {nick} {body}"),
+            (Some(nick), LineType::Notice) => format!("-{nick}- {body}"),
+            _ => body,
+        }
     }
 
     /// The line's HTML, ready for `MessageBuffer.bufferElementAppend`.
@@ -260,7 +349,7 @@ impl Line {
             .timestamp_format
             .as_deref()
             .unwrap_or(DEFAULT_TIMESTAMP_FORMAT);
-        set("lineNumber", self.id.clone().into());
+        set("lineNumber", self.id.to_string().into());
         set("lineType", self.kind.as_str().into());
         set("command", self.command.clone().into());
         set("rawCommand", self.command.clone().into());
@@ -286,10 +375,7 @@ impl Line {
         );
         set(
             "localizedTimestamp",
-            self.received_at
-                .format("%B %-d, %Y at %-I:%M:%S %p")
-                .to_string()
-                .into(),
+            self.received_at.format(LONG_DATE).to_string().into(),
         );
         set("formattedMessage", formatted_message.into());
         set("message", self.body.clone().into());
@@ -344,17 +430,23 @@ fn format_time(time: &DateTime<Local>, format: &str) -> String {
     time.format(DEFAULT_TIMESTAMP_FORMAT).to_string()
 }
 
-fn event(kind: LineType, message: &Message, body: String) -> Line {
-    Line::new(kind, &message.command, None, body)
+fn is_numeric(command: &str) -> bool {
+    command.len() == 3 && command.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Whether `text` names `nick` as a whole word, ignoring case.
-fn mentions(text: &str, nick: &str) -> bool {
+/// Whether `text` names `nick` as a whole word (Textual's exact match: no
+/// letter or digit on either side), with case folded by the server's
+/// casemap.
+fn mentions(text: &str, nick: &str, casemap: CaseMapping) -> bool {
     if nick.is_empty() {
         return false;
     }
-    let text = text.to_lowercase();
-    let nick = nick.to_lowercase();
+    // Folding maps ASCII to ASCII and leaves the rest, so byte offsets in
+    // the folded text are offsets in the original.
+    let text = casemap.nick(text);
+    let text = text.as_str();
+    let nick = casemap.nick(nick);
+    let nick = nick.as_str();
     let is_word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
     text.match_indices(&nick).any(|(i, m)| {
         !is_word(text[..i].chars().next_back()) && !is_word(text[i + m.len()..].chars().next())
@@ -463,10 +555,14 @@ mod tests {
     }
 
     #[test]
-    fn mentions_need_a_whole_word() {
-        assert!(mentions("hey Tester, look", "tester"));
-        assert!(!mentions("testers unite", "tester"));
-        assert!(!mentions("anything", ""));
+    fn mentions_need_a_whole_word_under_the_casemap() {
+        let rfc = CaseMapping::Rfc1459;
+        assert!(mentions("hey Tester, look", "tester", rfc));
+        assert!(!mentions("testers unite", "tester", rfc));
+        assert!(!mentions("anything", "", rfc));
+        assert!(mentions("ping NICK{}: there", "nick[]", rfc));
+        assert!(!mentions("ping nick{}", "nick[]", CaseMapping::Ascii));
+        assert!(mentions("é-nick", "nick", rfc), "punctuation is a boundary");
     }
 
     #[test]
@@ -477,38 +573,99 @@ mod tests {
         assert_ne!(a, nickname_color("bob", NicknameColors::HslLight));
     }
 
+    fn stamp() -> Stamp {
+        Stamp {
+            id: LineId::new(1),
+            at: Local.timestamp_opt(0, 0).unwrap(),
+        }
+    }
+
+    fn ergo() -> Isupport {
+        let mut isupport = Isupport::default();
+        isupport.apply(&["CHANTYPES=#", "PREFIX=(qaohv)~&@%+", "STATUSMSG=~&@%+"]);
+        isupport
+    }
+
     #[test]
     fn maps_server_messages_to_lines() {
-        let line = |raw: &str| Line::from_message(&Message::parse(raw).unwrap(), "me");
+        let isupport = ergo();
+        let line =
+            |raw: &str| Line::from_message(&Message::parse(raw).unwrap(), "me", &isupport, stamp());
         let (dest, l) = line(":alice!a@h PRIVMSG #c :hi me").unwrap();
         assert_eq!(dest, Destination::Channel("#c".into()));
         assert_eq!((l.kind, l.highlight), (LineType::Privmsg, true));
+        assert_eq!(l.plain_text(), "<alice> hi me");
 
         let (_, l) = line(":alice!a@h PRIVMSG #c :\x01ACTION waves\x01").unwrap();
         assert_eq!((l.kind, l.body.as_str()), (LineType::Action, "waves"));
 
         let (dest, l) = line(":alice!a@h QUIT :bye").unwrap();
-        assert_eq!(dest, Destination::ChannelsOf("alice".into()));
+        assert_eq!(dest, Destination::Nick("alice".into()));
         assert_eq!(l.body, "\x02alice\x02 (a@h\x0F) left IRC (bye\x0F)");
+        assert_eq!(l.plain_text(), "alice (a@h) left IRC (bye)");
 
         let (dest, _) = line(":bob!b@h PRIVMSG me :psst").unwrap();
-        assert_eq!(dest, Destination::Channel("bob".into()));
+        assert_eq!(dest, Destination::Query("bob".into()));
         assert!(line("PING :x").is_none());
 
         let (dest, l) = line("NOTICE AUTH :*** Looking up your hostname").unwrap();
         assert_eq!((dest, l.nickname), (Destination::Server, None));
         let (dest, _) = line(":irc.example NOTICE me :hi").unwrap();
         assert_eq!(dest, Destination::Server);
-        let (dest, _) = line(":me!u@h PRIVMSG bob :echoed").unwrap();
-        assert_eq!(dest, Destination::Channel("bob".into()));
+        let (dest, l) = line("@msgid=x1 :ME!u@h PRIVMSG bob :echoed").unwrap();
+        assert_eq!(dest, Destination::Query("bob".into()));
+        assert!(l.from_self && !l.highlight);
+        assert_eq!(l.msgid.as_deref(), Some("x1"));
         let (dest, _) = line(":a!u@h PRIVMSG @#c :ops only").unwrap();
         assert_eq!(dest, Destination::Channel("#c".into()));
-        let (dest, _) = line(":a!u@h PRIVMSG +modeless :hi").unwrap();
-        assert_eq!(dest, Destination::Channel("+modeless".into()));
+        let (dest, _) = line(":a!u@h PRIVMSG &#c :admins only").unwrap();
+        assert_eq!(dest, Destination::Channel("#c".into()));
 
         assert!(line(":a!u@h PRIVMSG #c :\x01VERSION\x01").is_none());
         let (_, l) = line(":a!u@h PRIVMSG #c :\x01ACTION\x01").unwrap();
         assert_eq!((l.kind, l.body.as_str()), (LineType::Action, ""));
         assert!(line(":a!u@h NOTICE #c :\x01ACTION x\x01").is_none());
+    }
+
+    #[test]
+    fn numerics_print_like_textual() {
+        let isupport = ergo();
+        let line = |raw: &str| {
+            let (dest, l) =
+                Line::from_message(&Message::parse(raw).unwrap(), "me", &isupport, stamp())
+                    .unwrap();
+            (dest, l.plain_text())
+        };
+        assert_eq!(
+            line(":s 001 me :Welcome to IRC"),
+            (Destination::Server, "Welcome to IRC".into())
+        );
+        assert_eq!(
+            line(":s 403 me #x :No such channel"),
+            (
+                Destination::Server,
+                "Message(403): #x No such channel".into()
+            )
+        );
+        assert_eq!(
+            line(":s 422 me :MOTD File is missing"),
+            (Destination::Server, "MOTD File is missing".into())
+        );
+        assert_eq!(
+            line(":s 332 me #c :the topic"),
+            (
+                Destination::Channel("#c".into()),
+                "Topic is the topic".into()
+            )
+        );
+        assert_eq!(
+            line(":s 324 me #c +Cnt"),
+            (Destination::Channel("#c".into()), "Mode is +Cnt".into())
+        );
+        assert_eq!(
+            line(":me!u@h MODE me +i").0,
+            Destination::Server,
+            "a user mode goes to the console"
+        );
     }
 }

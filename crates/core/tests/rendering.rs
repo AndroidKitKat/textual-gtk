@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use chrono::{Local, TimeZone};
 use textual_core::irc::Message;
-use textual_core::line::Line;
+use textual_core::irc::isupport::Isupport;
+use textual_core::line::{Line, LineId, LineType, Stamp};
 use textual_core::style::{Appearance, Font, Style};
 
 fn resources() -> PathBuf {
@@ -12,8 +14,16 @@ fn simplified() -> Style {
     Style::load(&resources(), "Simplified", Appearance::Light).unwrap()
 }
 
+fn stamp() -> Stamp {
+    Stamp {
+        id: LineId::new(7),
+        at: Local.timestamp_opt(1_800_000_000, 0).unwrap(),
+    }
+}
+
 fn render(raw: &str) -> String {
-    let (_, line) = Line::from_message(&Message::parse(raw).unwrap(), "me").unwrap();
+    let message = Message::parse(raw).unwrap();
+    let (_, line) = Line::from_message(&message, "me", &Isupport::default(), stamp()).unwrap();
     line.render(&simplified())
 }
 
@@ -33,13 +43,8 @@ fn loads_every_bundled_style_in_both_appearances() {
             let style =
                 Style::load(&resources(), name, want).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(!style.css_files.is_empty(), "{name} has no CSS");
-            let html = Line::new(
-                textual_core::line::LineType::Privmsg,
-                "PRIVMSG",
-                Some("a"),
-                "b".into(),
-            )
-            .render(&style);
+            let html = Line::new(stamp(), LineType::Privmsg, "PRIVMSG", Some("a"), "b".into())
+                .render(&style);
             assert!(html.contains("class=\"line"), "{name}: {html}");
         }
     }

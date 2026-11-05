@@ -180,6 +180,11 @@ fn escape_fragment(text: &str) -> String {
 
 /// Renders `body` to HTML. `spoilers` marks a run whose foreground and
 /// background match (Textual does this for PRIVMSG, ACTION and NOTICE).
+/// The body's text with every formatting code removed.
+pub fn strip(body: &str) -> String {
+    parse_runs(body).into_iter().map(|run| run.text).collect()
+}
+
 pub fn render(body: &str, spoilers: bool, fragment: &dyn Fn(&Value) -> String) -> String {
     let runs = parse_runs(body);
     let mut out = String::new();

@@ -3,9 +3,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use chrono::Local;
 use gtk::glib;
 use textual_core::irc::Message;
-use textual_core::line::{Destination, Line, LineType};
+use textual_core::irc::isupport::Isupport;
+use textual_core::line::{Destination, Line, LineId, LineType, Stamp};
 use textual_core::style::{Appearance, Style};
 use textual_gtk::irc::connection::{self, Command, Config, Disconnect, Event};
 use textual_gtk::ui::chat_view::{self, ChatView};
@@ -177,17 +179,28 @@ fn build_window(
     );
     let commands = connection.commands.clone();
     let own_nick = Rc::new(RefCell::new(options.nick.clone()));
+    let stamp = {
+        let next = Rc::new(std::cell::Cell::new(0));
+        move || {
+            next.set(next.get() + 1);
+            Stamp {
+                id: LineId::new(next.get()),
+                at: Local::now(),
+            }
+        }
+    };
 
     let print = {
         let view = view.clone();
         let style = style.clone();
-        move |line: Line| view.append(line.render(&style), &line.id)
+        move |line: Line| view.append(line.render(&style), &line.id.to_string())
     };
 
     {
         let channel = options.channel.clone();
         let own_nick = own_nick.clone();
         let print = print.clone();
+        let stamp = stamp.clone();
         entry.connect_activate(move |entry| {
             let text = entry.text().to_string();
             if text.is_empty() {
@@ -200,6 +213,7 @@ fn build_window(
                     return;
                 }
                 let mut line = Line::new(
+                    stamp(),
                     LineType::Privmsg,
                     "PRIVMSG",
                     Some(&own_nick.borrow()),
@@ -223,6 +237,7 @@ fn build_window(
             match event {
                 Event::Connected => {}
                 Event::Refused { message, reason } => print(Line::new(
+                    stamp(),
                     LineType::Debug,
                     "-100",
                     None,
@@ -256,13 +271,15 @@ fn build_window(
                     {
                         *own_nick.borrow_mut() = new.to_owned();
                     }
-                    let Some((destination, line)) = Line::from_message(&message, &current) else {
+                    let Some((destination, line)) =
+                        Line::from_message(&message, &current, &Isupport::default(), stamp())
+                    else {
                         continue;
                     };
                     let shown = match &destination {
                         Destination::Channel(name) => name.eq_ignore_ascii_case(&channel),
-                        Destination::ChannelsOf(_) => true,
-                        Destination::Server => false,
+                        Destination::Nick(_) => true,
+                        Destination::Query(_) | Destination::Server => false,
                     };
                     if shown {
                         print(line);
@@ -281,7 +298,7 @@ fn build_window(
                         }
                         Disconnect::Error(e) => format!("Disconnected from IRC: {e}"),
                     };
-                    print(Line::new(LineType::Debug, "-100", None, text));
+                    print(Line::client(stamp(), text));
                 }
             }
         }
