@@ -89,6 +89,12 @@ async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: &mpsc::UnboundedSender<Event>,
 ) -> io::Result<Disconnect> {
+    if config.nick.is_empty() || config.nick.contains(' ') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bad nick or user name: a nick cannot be empty or contain spaces",
+        ));
+    }
     let registration = [
         Message::new("NICK", &[&config.nick]),
         Message::new("USER", &[&config.username, "0", "*", &config.realname]),

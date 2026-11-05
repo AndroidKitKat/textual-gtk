@@ -126,24 +126,35 @@ impl Line {
 
         let (destination, mut line) = match message.command.as_str() {
             "PRIVMSG" | "NOTICE" => {
-                let target = param(0);
+                // STATUSMSG (`@#chan`) goes to the channel itself.
+                let target = param(0).trim_start_matches(['@', '+', '%', '~']);
                 let text = param(1);
-                let (kind, text) = match text
-                    .strip_prefix("\x01ACTION ")
-                    .map(|t| t.trim_end_matches('\x01'))
-                {
-                    Some(action) => (LineType::Action, action),
+                let ctcp = text
+                    .strip_prefix('\x01')
+                    .map(|t| t.strip_suffix('\x01').unwrap_or(t));
+                let (kind, text) = match ctcp {
+                    Some(ctcp) if message.command == "PRIVMSG" => {
+                        match ctcp.split_once(' ').unwrap_or((ctcp, "")) {
+                            ("ACTION", action) => (LineType::Action, action),
+                            _ => return None,
+                        }
+                    }
+                    Some(_) => return None,
                     None if message.command == "NOTICE" => (LineType::Notice, text),
                     None => (LineType::Privmsg, text),
                 };
-                let destination = if target.starts_with(['#', '&', '!', '+']) {
+                let from_server = source.is_none_or(|s| s.user.is_none() && s.host.is_none());
+                let destination = if target.starts_with(['#', '&', '!']) {
                     Destination::Channel(target.to_owned())
-                } else if source.is_some_and(|s| s.user.is_none()) {
+                } else if from_server {
                     Destination::Server
+                } else if mine {
+                    Destination::Channel(target.to_owned())
                 } else {
                     Destination::Channel(nick.to_owned())
                 };
-                let mut line = Line::new(kind, &message.command, Some(nick), text.to_owned());
+                let speaker = (!nick.is_empty()).then_some(nick);
+                let mut line = Line::new(kind, &message.command, speaker, text.to_owned());
                 line.highlight = !mine && mentions(text, own_nick);
                 (destination, line)
             }
@@ -227,7 +238,7 @@ impl Line {
 
     /// The line's HTML, ready for `MessageBuffer.bufferElementAppend`.
     pub fn render(&self, style: &Style) -> String {
-        let spoilers = matches!(self.kind, LineType::Privmsg | LineType::Notice);
+        let spoilers = self.kind.is_spoken();
         let fragment = |ctx: &Value| {
             style
                 .render("formattedMessageFragment", ctx)
@@ -265,7 +276,7 @@ impl Line {
         );
         set(
             "formattedTimestamp",
-            self.received_at.format(timestamp_format).to_string().into(),
+            format_time(&self.received_at, timestamp_format).into(),
         );
         set(
             "localizedTimestamp",
@@ -309,8 +320,22 @@ impl Line {
         } else {
             "newMessagePostedWithoutSender"
         };
-        style.render(template, &Value::Map(ctx)).unwrap_or_default()
+        style.render(template, &Value::Map(ctx)).unwrap_or_else(|| {
+            eprintln!("textual-gtk: the style has no {template} template");
+            String::new()
+        })
     }
+}
+
+/// strftime that falls back to Textual's default when a style's format is
+/// one chrono cannot render.
+fn format_time(time: &DateTime<Local>, format: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    if write!(out, "{}", time.format(format)).is_ok() {
+        return out;
+    }
+    time.format(DEFAULT_TIMESTAMP_FORMAT).to_string()
 }
 
 fn event(kind: LineType, message: &Message, body: String) -> Line {
@@ -331,7 +356,9 @@ fn mentions(text: &str, nick: &str) -> bool {
 }
 
 /// Expands Textual's nickname format: `%n` the nick, `%@` the mode symbol,
-/// `%%` a percent sign, and `%Nn` / `%-Nn` the nick padded to width N.
+/// `%%` a percent sign, `%Nn` the nick padded on the right to width N and
+/// `%-Nn` padded on the left (`IRCClient.m:5200-5217`). Unknown markers
+/// are dropped.
 fn format_nickname(format: &str, nick: &str, mode: &str) -> String {
     let mut out = String::new();
     let mut chars = format.chars().peekable();
@@ -347,15 +374,11 @@ fn format_nickname(format: &str, nick: &str, mode: &str) -> String {
         }
         let width: usize = width.parse().unwrap_or(0);
         match chars.next() {
-            Some('n') if left => out.push_str(&format!("{nick:<width$}")),
-            Some('n') => out.push_str(&format!("{nick:>width$}")),
+            Some('n') if left => out.push_str(&format!("{nick:>width$}")),
+            Some('n') => out.push_str(&format!("{nick:<width$}")),
             Some('@') => out.push_str(mode),
             Some('%') => out.push('%'),
-            Some(other) => {
-                out.push('%');
-                out.push(other);
-            }
-            None => out.push('%'),
+            Some(_) | None => {}
         }
     }
     out
@@ -419,9 +442,18 @@ mod tests {
     #[test]
     fn nickname_format_expands_like_textual() {
         assert_eq!(format_nickname("<%@%n>", "alice", "@"), "<@alice>");
-        assert_eq!(format_nickname("%8n|", "bob", ""), "     bob|");
-        assert_eq!(format_nickname("%-8n|", "bob", ""), "bob     |");
-        assert_eq!(format_nickname("100%% %n", "x", ""), "100% x");
+        assert_eq!(format_nickname("%8n|", "bob", ""), "bob     |");
+        assert_eq!(format_nickname("%-8n|", "bob", ""), "     bob|");
+        assert_eq!(format_nickname("100%% %n%q%", "x", ""), "100% x");
+    }
+
+    #[test]
+    fn a_bad_style_timestamp_format_falls_back() {
+        let time = Local::now();
+        assert_eq!(
+            format_time(&time, "[%Q %H]"),
+            format_time(&time, DEFAULT_TIMESTAMP_FORMAT)
+        );
     }
 
     #[test]
@@ -456,5 +488,19 @@ mod tests {
         let (dest, _) = line(":bob!b@h PRIVMSG me :psst").unwrap();
         assert_eq!(dest, Destination::Channel("bob".into()));
         assert!(line("PING :x").is_none());
+
+        let (dest, l) = line("NOTICE AUTH :*** Looking up your hostname").unwrap();
+        assert_eq!((dest, l.nickname), (Destination::Server, None));
+        let (dest, _) = line(":irc.example NOTICE me :hi").unwrap();
+        assert_eq!(dest, Destination::Server);
+        let (dest, _) = line(":me!u@h PRIVMSG bob :echoed").unwrap();
+        assert_eq!(dest, Destination::Channel("bob".into()));
+        let (dest, _) = line(":a!u@h PRIVMSG @#c :ops only").unwrap();
+        assert_eq!(dest, Destination::Channel("#c".into()));
+
+        assert!(line(":a!u@h PRIVMSG #c :\x01VERSION\x01").is_none());
+        let (_, l) = line(":a!u@h PRIVMSG #c :\x01ACTION\x01").unwrap();
+        assert_eq!((l.kind, l.body.as_str()), (LineType::Action, ""));
+        assert!(line(":a!u@h NOTICE #c :\x01ACTION x\x01").is_none());
     }
 }

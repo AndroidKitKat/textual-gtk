@@ -191,12 +191,7 @@ impl Style {
     /// cache when the style is reloaded.
     pub fn initial_document(&self, channel: &str, font: &Font, cache_token: &str) -> String {
         let paths = |files: &[PathBuf]| {
-            Value::List(
-                files
-                    .iter()
-                    .map(|p| Value::Str(p.display().to_string()))
-                    .collect(),
-            )
+            Value::List(files.iter().map(|p| Value::Str(file_url(p))).collect())
         };
         let appearance = match self.appearance {
             Appearance::Light => "light",
@@ -209,16 +204,9 @@ impl Style {
             ("cacheToken", cache_token.into()),
             (
                 "applicationTemplatesPath",
-                self.resources
-                    .join("Style Default Templates/Version 4")
-                    .display()
-                    .to_string()
-                    .into(),
+                file_url(&self.resources.join("Style Default Templates/Version 4")).into(),
             ),
-            (
-                "applicationResourcePath",
-                self.resources.display().to_string().into(),
-            ),
+            ("applicationResourcePath", file_url(&self.resources).into()),
             ("userConfiguredFontName", font.family.clone().into()),
             (
                 "userConfiguredFontSize",
@@ -249,6 +237,21 @@ impl Style {
 pub struct Font {
     pub family: String,
     pub points: f64,
+}
+
+/// A `file://` URL with every byte outside the unreserved set and `/`
+/// percent-encoded, so it is safe in attributes and JS string literals.
+pub fn file_url(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut url = String::from("file://");
+    for &byte in path.as_os_str().as_bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            url.push(byte as char);
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
 }
 
 fn read_settings(path: &Path) -> Result<plist::Dictionary, StyleError> {

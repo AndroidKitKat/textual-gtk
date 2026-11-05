@@ -102,7 +102,11 @@ fn the_initial_document_loads_the_style_and_textual_js() {
         points: 12.0,
     };
     let html = style.initial_document("#textual", &font, "42");
-    let css = style.css_files[0].display().to_string();
+    let css = textual_gtk::style::file_url(&style.css_files[0]);
+    assert!(
+        css.starts_with("file:///") && css.contains("Bundled%20Styles"),
+        "{css}"
+    );
     assert!(html.contains(&format!("href=\"{css}?42\"")), "{html}");
     assert!(html.contains("JavaScript/API/core.js"), "{html}");
     assert!(html.contains("Textual.initializeCore(\""), "{html}");

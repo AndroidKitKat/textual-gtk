@@ -131,7 +131,7 @@ fn take_hex_colors(chars: &mut Chars<'_>) -> (Option<Color>, Option<Color>) {
         let candidate: String = chars.clone().take(6).collect();
         if candidate.len() == 6 && candidate.chars().all(|c| c.is_ascii_hexdigit()) {
             chars.nth(5);
-            Some(candidate)
+            Some(candidate.to_ascii_uppercase())
         } else {
             None
         }
@@ -179,7 +179,7 @@ fn escape_fragment(text: &str) -> String {
 }
 
 /// Renders `body` to HTML. `spoilers` marks a run whose foreground and
-/// background match (Textual does this for PRIVMSG and NOTICE only).
+/// background match (Textual does this for PRIVMSG, ACTION and NOTICE).
 pub fn render(body: &str, spoilers: bool, fragment: &dyn Fn(&Value) -> String) -> String {
     let runs = parse_runs(body);
     let mut out = String::new();
@@ -323,7 +323,7 @@ mod tests {
     fn hex_colors_parse_six_digits() {
         let got = runs("\x04FF0000,00ff00x");
         assert_eq!(got[0].1.foreground, Some(Color::Hex("FF0000".into())));
-        assert_eq!(got[0].1.background, Some(Color::Hex("00ff00".into())));
+        assert_eq!(got[0].1.background, Some(Color::Hex("00FF00".into())));
         assert_eq!(runs("\x04FF00x")[0].0, "FF00x");
     }
 
