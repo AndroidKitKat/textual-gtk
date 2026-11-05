@@ -4,8 +4,9 @@
 Starts the real app under Xvfb against a local IRC server, has a second
 client set the topic and say something in the app's channel, and passes
 only if the app's page shows it (read from the page's DOM through the
-TEXTUAL_GTK_PROBE hook). Then reloads the page and checks the lines come
-back, and closes the window and checks the server sees the app quit.
+TEXTUAL_GTK_PROBE hook). Then reloads the page and kills its web process,
+checking both times that the lines come back, clears the topic, and closes
+the window, checking the server sees the app quit.
 
     scripts/e2e.py [--server 127.0.0.1:6667] [--out DIR]
 
@@ -95,6 +96,21 @@ class Probe:
         fail(f"{what} never happened; last probe: {state}")
 
 
+def descendants(root):
+    """Pids under `root`, so only this run's processes are touched."""
+    table = subprocess.run(["ps", "-e", "-o", "pid=,ppid=,comm="], capture_output=True, text=True).stdout
+    children = {}
+    for row in table.splitlines():
+        pid, ppid, comm = row.split(None, 2)
+        children.setdefault(int(ppid), []).append((int(pid), comm.strip()))
+    found, stack = [], [root]
+    while stack:
+        for pid, comm in children.get(stack.pop(), []):
+            found.append((pid, comm))
+            stack.append(pid)
+    return found
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", default="127.0.0.1:6667")
@@ -164,6 +180,22 @@ def main():
         )
         checks["a reload brings back every line"] = after["last"] == before["last"]
         checks["a reload brings back the topic"] = after["topic"] == before["topic"]
+
+        web = [pid for pid, comm in descendants(app.pid) if comm.startswith("WebKitWebProces")]
+        checks["found this run's web process"] = len(web) == 1
+        for pid in web:
+            os.kill(pid, signal.SIGKILL)
+        talker.send(f"PRIVMSG {channel} :while it was down {token}")
+        recovered = probe.wait_until(
+            lambda s: s["loadedAt"] != after["loadedAt"] and f"while it was down {token}" in s["last"],
+            "the view to recover from a crashed web process", 20,
+        )
+        checks["a crashed web process is recovered"] = recovered["lines"] == before["lines"] + 1
+
+        talker.send(f"TOPIC {channel} :")
+        cleared = probe.wait_until(lambda s: s["topic"] == "(No Topic)", "the topic bar to clear", 10)
+        checks["an empty topic shows (No Topic)"] = cleared["topic"] == "(No Topic)"
+
         snapshot = prefix.with_suffix(".png")
         checks["snapshot written"] = snapshot.exists() and snapshot.stat().st_size > 5000
 

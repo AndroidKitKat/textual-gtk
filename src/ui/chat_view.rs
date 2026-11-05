@@ -65,6 +65,10 @@ const HANDLERS: &[&str] = &[
 /// Textual's hard scrollback limit (`messageBuffer.js`). The view keeps
 /// this many lines so it can rebuild the page after a reload or a crash.
 const KEPT_LINES: usize = 1000;
+/// More web-process crashes than this within the window and the view
+/// stops reloading.
+const MAX_CRASHES: usize = 3;
+const CRASH_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct Inner {
     view: WebView,
@@ -75,6 +79,9 @@ struct Inner {
     ready: bool,
     lines: VecDeque<(String, String)>,
     topic: Option<(String, String)>,
+    /// When the web process last ended, to stop reloading a page that
+    /// crashes every time.
+    crashes: Vec<std::time::Instant>,
 }
 
 impl Inner {
@@ -161,6 +168,7 @@ impl ChatView {
                 ready: false,
                 lines: VecDeque::new(),
                 topic: None,
+                crashes: Vec::new(),
             })),
         };
 
@@ -186,12 +194,22 @@ impl ChatView {
 
         let weak = Rc::downgrade(&chat.inner);
         view.connect_web_process_terminated(move |view, reason| {
-            eprintln!("textual-gtk: the view's web process ended ({reason:?}); reloading");
-            if let Some(inner) = weak.upgrade() {
-                let mut inner = inner.borrow_mut();
-                inner.ready = false;
-                view.load_uri(&inner.page_uri);
+            let Some(inner) = weak.upgrade() else { return };
+            let mut inner = inner.borrow_mut();
+            inner.ready = false;
+            let now = std::time::Instant::now();
+            inner
+                .crashes
+                .retain(|t| now.duration_since(*t) < CRASH_WINDOW);
+            inner.crashes.push(now);
+            if inner.crashes.len() > MAX_CRASHES {
+                eprintln!(
+                    "textual-gtk: the view's web process keeps ending ({reason:?}); giving up"
+                );
+                return;
             }
+            eprintln!("textual-gtk: the view's web process ended ({reason:?}); reloading");
+            view.load_uri(&inner.page_uri);
         });
         view.connect_load_changed({
             let weak = Rc::downgrade(&chat.inner);
@@ -234,6 +252,12 @@ impl ChatView {
                 .render("formattedMessageFragment", ctx)
                 .unwrap_or_default()
         };
+        // Textual's wording for a channel without a topic (TVCMainWindow[vi3-23]).
+        let topic = if topic.is_empty() {
+            "(No Topic)"
+        } else {
+            topic
+        };
         let html = crate::style::body::render(topic, false, &fragment);
         let plain: String = topic.chars().filter(|c| *c >= ' ').collect();
         let mut inner = self.inner.borrow_mut();
@@ -256,9 +280,9 @@ impl ChatView {
     }
 }
 
-/// The view only ever shows its own page. Any other navigation (a clicked
-/// link, a script, a new window) is refused, and http(s) links open in the
-/// user's browser instead.
+/// The view only ever shows its own page. Any other navigation (a link, a
+/// script, a new window) is refused; an http(s) link the user clicked opens
+/// in their browser instead.
 fn keep_on_page(page_uri: &str, decision: &PolicyDecision, kind: PolicyDecisionType) -> bool {
     if !matches!(
         kind,
@@ -266,10 +290,12 @@ fn keep_on_page(page_uri: &str, decision: &PolicyDecision, kind: PolicyDecisionT
     ) {
         return false;
     }
-    let uri = decision
+    let action = decision
         .downcast_ref::<NavigationPolicyDecision>()
-        .and_then(|d| d.navigation_action())
-        .and_then(|a| a.request())
+        .and_then(|d| d.navigation_action());
+    let uri = action
+        .as_ref()
+        .and_then(|a| a.clone().request())
         .and_then(|r| r.uri())
         .map(|u| u.to_string())
         .unwrap_or_default();
@@ -278,7 +304,8 @@ fn keep_on_page(page_uri: &str, decision: &PolicyDecision, kind: PolicyDecisionT
         return true;
     }
     decision.ignore();
-    if uri.starts_with("https://") || uri.starts_with("http://") {
+    let clicked = action.is_some_and(|a| a.is_user_gesture());
+    if clicked && (uri.starts_with("https://") || uri.starts_with("http://")) {
         gtk::UriLauncher::new(&uri).launch(
             None::<&gtk::Window>,
             None::<&gtk::gio::Cancellable>,

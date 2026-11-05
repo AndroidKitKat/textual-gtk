@@ -126,8 +126,14 @@ impl Line {
 
         let (destination, mut line) = match message.command.as_str() {
             "PRIVMSG" | "NOTICE" => {
-                // STATUSMSG (`@#chan`) goes to the channel itself.
-                let target = param(0).trim_start_matches(['@', '+', '%', '~']);
+                // STATUSMSG (`@#chan`) goes to the channel itself; `+chan`
+                // is a channel in its own right.
+                let stripped = param(0).trim_start_matches(['@', '+', '%', '~']);
+                let target = if stripped.starts_with(['#', '&', '!']) {
+                    stripped
+                } else {
+                    param(0)
+                };
                 let text = param(1);
                 let ctcp = text
                     .strip_prefix('\x01')
@@ -144,7 +150,7 @@ impl Line {
                     None => (LineType::Privmsg, text),
                 };
                 let from_server = source.is_none_or(|s| s.user.is_none() && s.host.is_none());
-                let destination = if target.starts_with(['#', '&', '!']) {
+                let destination = if target.starts_with(['#', '&', '!', '+']) {
                     Destination::Channel(target.to_owned())
                 } else if from_server {
                     Destination::Server
@@ -497,6 +503,8 @@ mod tests {
         assert_eq!(dest, Destination::Channel("bob".into()));
         let (dest, _) = line(":a!u@h PRIVMSG @#c :ops only").unwrap();
         assert_eq!(dest, Destination::Channel("#c".into()));
+        let (dest, _) = line(":a!u@h PRIVMSG +modeless :hi").unwrap();
+        assert_eq!(dest, Destination::Channel("+modeless".into()));
 
         assert!(line(":a!u@h PRIVMSG #c :\x01VERSION\x01").is_none());
         let (_, l) = line(":a!u@h PRIVMSG #c :\x01ACTION\x01").unwrap();
