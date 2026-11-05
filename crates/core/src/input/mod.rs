@@ -5,4 +5,5 @@
 pub mod commands;
 pub mod completion;
 pub mod history;
+pub mod keys;
 pub mod split;

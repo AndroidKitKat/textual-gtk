@@ -246,6 +246,7 @@ fn a_long_line_is_cut_to_what_the_server_relays() {
         h.input(Input::Ui(UiAction::Submit {
             buffer,
             text: text.clone(),
+            as_action: false,
             confirmed: false,
         }))
     };
@@ -315,6 +316,7 @@ fn raw_and_unknown_commands_go_out_as_typed() {
         let out = h.input(Input::Ui(UiAction::Submit {
             buffer: console,
             text: text.to_owned(),
+            as_action: false,
             confirmed: true,
         }));
         sent_raw(&out)

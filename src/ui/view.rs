@@ -11,10 +11,10 @@ use std::time::Instant;
 
 use adw::prelude::*;
 use gtk::glib;
-use textual_core::model::Change;
 use textual_core::model::buffer::{Body, BufferId};
 use textual_core::model::members::MemberDiff;
 use textual_core::model::workspace::{Input, UiAction, UiEffect, Workspace};
+use textual_core::model::{Change, Preferences};
 use textual_core::style::{Style, ViewKind};
 
 use crate::app::{Inbox, Request};
@@ -41,12 +41,18 @@ pub struct View {
 }
 
 impl View {
-    pub fn build(app: &adw::Application, style: Rc<Style>, tx: Inbox, pages: &Path) -> Self {
+    pub fn build(
+        app: &adw::Application,
+        style: Rc<Style>,
+        tx: Inbox,
+        pages: &Path,
+        prefs: &Preferences,
+    ) -> Self {
         let sidebar = Sidebar::build(&tx);
         let members = MemberList::build();
         let stack = gtk::Stack::builder().hexpand(true).vexpand(true).build();
         let focus = Rc::new(Cell::new(None::<BufferId>));
-        let input = InputBar::build(tx.clone(), focus.clone());
+        let input = InputBar::build(tx.clone(), focus.clone(), prefs.clone());
 
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat.append(&stack);

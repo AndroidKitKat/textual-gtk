@@ -18,7 +18,7 @@ use textual_gtk::ui::probe;
 use textual_gtk::ui::view::View;
 
 const APP_ID: &str = "io.github.androidkitkat.TextualGtk";
-const USAGE: &str = "usage: textual-gtk --network 'name=Local,host=127.0.0.1,port=6667,tls=off,nick=me,join=#a #b' [--network ...] [--style name] [--rejoin-on-kick true|false] [--input-history-per-buffer true|false]
+const USAGE: &str = "usage: textual-gtk --network 'name=Local,host=127.0.0.1,port=6667,tls=off,nick=me,join=#a #b' [--network ...] [--style name] [--rejoin-on-kick true|false] [--input-history-per-buffer true|false] [--control-enter-sends-message true|false] [--command-return-sends-action true|false]
 network keys: name, host, nick (required); port (1-65535; 6667, or 6697 with tls=on); tls=off|on; verify=true|false (with tls=on); user (the nick); realname; join (space-separated channels, #chan:key for a key)
 write \\, for a comma inside a value and \\\\ for a backslash";
 
@@ -56,6 +56,14 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Command, String> 
             "--rejoin-on-kick" => prefs.rejoin_on_kick = boolean("--rejoin-on-kick", &value)?,
             "--input-history-per-buffer" => {
                 prefs.input_history_per_buffer = boolean("--input-history-per-buffer", &value)?;
+            }
+            "--control-enter-sends-message" => {
+                prefs.control_enter_sends_message =
+                    boolean("--control-enter-sends-message", &value)?;
+            }
+            "--command-return-sends-action" => {
+                prefs.command_return_sends_action =
+                    boolean("--command-return-sends-action", &value)?;
             }
             other => return Err(format!("unknown option {other}")),
         }
@@ -289,13 +297,13 @@ fn start(
     std::mem::forget(handle.enter());
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut workspace = Workspace::with_preferences(prefs);
+    let mut workspace = Workspace::with_preferences(prefs.clone());
     let mut out = Out::default();
     let servers: Vec<ServerId> = networks.iter().map(|n| n.id).collect();
     for config in networks {
         workspace.add_network(config, &mut out);
     }
-    let mut view = View::build(app, style, tx.clone(), pages);
+    let mut view = View::build(app, style, tx.clone(), pages, &prefs);
     view.apply(&workspace, &out.changes, &out.ui);
     let io = Io::new(runtime.clone(), tx.clone());
     for server in servers {
@@ -403,6 +411,17 @@ mod tests {
         assert!(!parse(&net).unwrap().prefs.input_history_per_buffer);
         let per = parse(&[net[0], net[1], "--input-history-per-buffer", "true"]).unwrap();
         assert!(per.prefs.input_history_per_buffer);
+        let keys = parse(&[
+            net[0],
+            net[1],
+            "--control-enter-sends-message",
+            "true",
+            "--command-return-sends-action",
+            "false",
+        ])
+        .unwrap();
+        assert!(keys.prefs.control_enter_sends_message);
+        assert!(!keys.prefs.command_return_sends_action);
         assert_eq!(
             parse(&[net[0], net[1], "--rejoin-on-kick", "yes"]).unwrap_err(),
             "--rejoin-on-kick=yes: expected true or false"

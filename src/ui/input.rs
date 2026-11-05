@@ -7,6 +7,8 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
+use textual_core::input::keys::{self, Modifiers, Return};
+use textual_core::model::Preferences;
 use textual_core::model::buffer::BufferId;
 use textual_core::model::workspace::{UiAction, UiEffect};
 
@@ -21,6 +23,8 @@ const MAX_HEIGHT: i32 = 110;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Return,
+    /// Textual's Command+Return, Super here: the text as an action.
+    ReturnAsAction,
     Tab,
     ShiftTab,
     /// Up and Down, which walk history only from the first or last line.
@@ -35,6 +39,7 @@ impl Key {
     pub fn parse(name: &str) -> Option<Key> {
         Some(match name {
             "Return" => Key::Return,
+            "SuperReturn" => Key::ReturnAsAction,
             "Tab" => Key::Tab,
             "ShiftTab" => Key::ShiftTab,
             "Up" => Key::Up,
@@ -53,12 +58,19 @@ pub struct InputBar {
     tx: Inbox,
     /// The focused buffer, set by the view from the model's `Focus`.
     focus: Rc<Cell<Option<BufferId>>>,
-    /// The open flood question and the text it asks about.
-    flood: Rc<RefCell<Option<(adw::AlertDialog, BufferId, String)>>>,
+    flood: Rc<RefCell<Option<FloodQuestion>>>,
+}
+
+/// The open flood question and what a yes sends.
+struct FloodQuestion {
+    dialog: adw::AlertDialog,
+    buffer: BufferId,
+    text: String,
+    as_action: bool,
 }
 
 impl InputBar {
-    pub fn build(tx: Inbox, focus: Rc<Cell<Option<BufferId>>>) -> Self {
+    pub fn build(tx: Inbox, focus: Rc<Cell<Option<BufferId>>>, prefs: Preferences) -> Self {
         let view = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
             .accepts_tab(false)
@@ -95,15 +107,22 @@ impl InputBar {
         keys.connect_key_pressed({
             let bar = bar.clone();
             move |_, key, _, state| {
-                let plain = !state.intersects(
-                    gdk::ModifierType::SHIFT_MASK
-                        | gdk::ModifierType::CONTROL_MASK
-                        | gdk::ModifierType::ALT_MASK,
-                );
+                let held = Modifiers {
+                    shift: state.contains(gdk::ModifierType::SHIFT_MASK),
+                    control: state.contains(gdk::ModifierType::CONTROL_MASK),
+                    alt: state.contains(gdk::ModifierType::ALT_MASK),
+                    command: state.contains(gdk::ModifierType::SUPER_MASK),
+                };
                 let key = match key {
-                    gdk::Key::Return | gdk::Key::KP_Enter if plain => Key::Return,
-                    gdk::Key::Up if plain => Key::Up,
-                    gdk::Key::Down if plain => Key::Down,
+                    gdk::Key::Return | gdk::Key::KP_Enter => {
+                        match keys::on_return(key == gdk::Key::KP_Enter, held, &prefs) {
+                            Return::Send => Key::Return,
+                            Return::SendAsAction => Key::ReturnAsAction,
+                            Return::Newline => return glib::Propagation::Proceed,
+                        }
+                    }
+                    gdk::Key::Up if keys::arrows_walk_history(held) => Key::Up,
+                    gdk::Key::Down if keys::arrows_walk_history(held) => Key::Down,
                     _ => return glib::Propagation::Proceed,
                 };
                 if bar.press(key) {
@@ -170,7 +189,7 @@ impl InputBar {
     pub fn press(&self, key: Key) -> bool {
         let text = self.text();
         let action = match key {
-            Key::Return => {
+            Key::Return | Key::ReturnAsAction => {
                 let Some(buffer) = self.focus.get() else {
                     return true;
                 };
@@ -178,6 +197,7 @@ impl InputBar {
                 UiAction::Submit {
                     buffer,
                     text,
+                    as_action: key == Key::ReturnAsAction,
                     confirmed: false,
                 }
             }
@@ -223,12 +243,22 @@ impl InputBar {
                     self.view.grab_focus();
                 }
             }
-            UiEffect::ConfirmFlood { buffer, text } => self.ask_flood(*buffer, text, window),
+            UiEffect::ConfirmFlood {
+                buffer,
+                text,
+                as_action,
+            } => self.ask_flood(*buffer, text, *as_action, window),
         }
     }
 
     /// Textual's possible-flood alert (`IRC[u4c-7i]`, `IRC[lql-8i]`).
-    fn ask_flood(&self, buffer: BufferId, text: &str, window: &adw::ApplicationWindow) {
+    fn ask_flood(
+        &self,
+        buffer: BufferId,
+        text: &str,
+        as_action: bool,
+        window: &adw::ApplicationWindow,
+    ) {
         let dialog = adw::AlertDialog::new(
             Some(
                 "The message that you are sending is very large which means it will be split \
@@ -245,13 +275,24 @@ impl InputBar {
             let bar = self.clone();
             move |_, response| bar.answer_flood(response == "yes")
         });
-        *self.flood.borrow_mut() = Some((dialog.clone(), buffer, text.to_owned()));
+        *self.flood.borrow_mut() = Some(FloodQuestion {
+            dialog: dialog.clone(),
+            buffer,
+            text: text.to_owned(),
+            as_action,
+        });
         dialog.present(Some(window));
     }
 
     /// Answers the open flood question, from its buttons or the probe.
     pub fn answer_flood(&self, send: bool) {
-        let Some((dialog, buffer, text)) = self.flood.borrow_mut().take() else {
+        let Some(FloodQuestion {
+            dialog,
+            buffer,
+            text,
+            as_action,
+        }) = self.flood.borrow_mut().take()
+        else {
             return;
         };
         dialog.force_close();
@@ -259,6 +300,7 @@ impl InputBar {
             let action = UiAction::Submit {
                 buffer,
                 text,
+                as_action,
                 confirmed: true,
             };
             let _ = self.tx.send(action.into());
@@ -270,7 +312,7 @@ impl InputBar {
         self.flood
             .borrow()
             .as_ref()
-            .map(|(_, _, text)| text.clone())
+            .map(|question| question.text.clone())
     }
 }
 

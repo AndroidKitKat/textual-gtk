@@ -9,7 +9,7 @@ use std::time::Instant;
 use crate::input::completion::Completion;
 use crate::input::history::History;
 use crate::model::buffer::{Buffer, BufferId};
-use crate::model::network::{self, Effect, Network, ServerConfig, ServerId};
+use crate::model::network::{self, Effect, Network, ServerConfig, ServerId, Speech};
 use crate::model::{Change, Cx, Ids, Now, Preferences};
 
 mod submit;
@@ -38,11 +38,13 @@ pub enum UiAction {
     WindowActive(bool),
     Close(BufferId),
     /// Return in the input of `buffer`. The view has already emptied the
-    /// field, as Textual does before anything is sent. `confirmed` is the
-    /// answer to `UiEffect::ConfirmFlood`.
+    /// field, as Textual does before anything is sent. `as_action` sends
+    /// text (not commands) as an action (Textual's Command+Return).
+    /// `confirmed` is the answer to `UiEffect::ConfirmFlood`.
     Submit {
         buffer: BufferId,
         text: String,
+        as_action: bool,
         confirmed: bool,
     },
     /// The input's text changed.
@@ -72,7 +74,11 @@ pub enum UiEffect {
     },
     /// Textual's "possible flood" question for text typed into `buffer`; a
     /// yes sends it again as `Submit { confirmed: true }`.
-    ConfirmFlood { buffer: BufferId, text: String },
+    ConfirmFlood {
+        buffer: BufferId,
+        text: String,
+        as_action: bool,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -245,8 +251,16 @@ impl Workspace {
             UiAction::Submit {
                 buffer,
                 text,
+                as_action,
                 confirmed,
-            } => self.submit(buffer, &text, confirmed, now, out),
+            } => {
+                let speech = if as_action {
+                    Speech::Action
+                } else {
+                    Speech::Privmsg
+                };
+                self.submit(buffer, &text, speech, confirmed, now, out);
+            }
             UiAction::Draft(text) => self.input.field = text,
             UiAction::History { text, older } => self.recall(text, older, out),
             UiAction::Complete {

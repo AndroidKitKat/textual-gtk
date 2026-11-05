@@ -38,7 +38,7 @@ pub struct Driver {
     /// The input field as a view would hold it: text and caret.
     field: (String, usize),
     /// The text of the last flood question, for `! confirm`.
-    flood: Option<(BufferId, String)>,
+    flood: Option<(BufferId, String, bool)>,
     view: View,
     /// Where the view built from changes disagreed with the workspace.
     drift: Vec<String>,
@@ -119,13 +119,17 @@ impl Driver {
                     self.ui
                         .push_back(format!("input {}", show_field(&self.field)));
                 }
-                UiEffect::ConfirmFlood { buffer, text } => {
+                UiEffect::ConfirmFlood {
+                    buffer,
+                    text,
+                    as_action,
+                } => {
                     self.ui.push_back(format!(
                         "confirm-flood {} {}",
                         self.label(buffer),
                         escape(&text)
                     ));
-                    self.flood = Some((buffer, text));
+                    self.flood = Some((buffer, text, as_action));
                 }
             }
         }
@@ -704,7 +708,8 @@ fn event(t: &mut Driver, rest: &str) -> Result<(), String> {
             ui(t, UiAction::Close(id));
             return Ok(());
         }
-        "type" => {
+        // `type-action` is Textual's Command+Return.
+        "type" | "type-action" => {
             let (name, text) = arg.split_once(' ').ok_or("type <buffer> text")?;
             let buffer = t.buffer(name)?.id();
             ui(
@@ -712,18 +717,20 @@ fn event(t: &mut Driver, rest: &str) -> Result<(), String> {
                 UiAction::Submit {
                     buffer,
                     text: unescape(text),
+                    as_action: what == "type-action",
                     confirmed: false,
                 },
             );
             return Ok(());
         }
         "confirm" => {
-            let (buffer, text) = t.flood.take().ok_or("no flood question to confirm")?;
+            let (buffer, text, as_action) = t.flood.take().ok_or("no flood question to confirm")?;
             ui(
                 t,
                 UiAction::Submit {
                     buffer,
                     text,
+                    as_action,
                     confirmed: true,
                 },
             );
@@ -769,6 +776,7 @@ fn event(t: &mut Driver, rest: &str) -> Result<(), String> {
                 UiAction::Submit {
                     buffer,
                     text,
+                    as_action: false,
                     confirmed: false,
                 },
             );

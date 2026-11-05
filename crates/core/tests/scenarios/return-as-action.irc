@@ -1,0 +1,19 @@
+# Textual's Command+Return (Super here) sends typed text as an action.
+# Commands stay commands, and a flood question keeps the choice.
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+! type-action #c waves
+> PRIVMSG #c :ACTION waves
+? line #c * textual waves
+! type-action #c /topic hello
+> TOPIC #c hello
+! type-action #c 1\n2\n3\n4\n5
+? ui confirm-flood #c 1\n2\n3\n4\n5
+! confirm
+> PRIVMSG #c :ACTION 1
+> PRIVMSG #c :ACTION 2
+> PRIVMSG #c :ACTION 3
+> PRIVMSG #c :ACTION 4
+> PRIVMSG #c :ACTION 5
+? registered textual

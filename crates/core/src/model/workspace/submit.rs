@@ -37,6 +37,7 @@ impl Workspace {
         &mut self,
         buffer: BufferId,
         text: &str,
+        speech: Speech,
         confirmed: bool,
         now: Now,
         out: &mut Out,
@@ -56,6 +57,7 @@ impl Workspace {
                 out.ui.push(UiEffect::ConfirmFlood {
                     buffer,
                     text: text.to_owned(),
+                    as_action: speech == Speech::Action,
                 });
                 return;
             }
@@ -75,7 +77,7 @@ impl Workspace {
                         else {
                             return;
                         };
-                        net.send_text(&target, Speech::Privmsg, text, Some(buffer), cx, o);
+                        net.send_text(&target, speech, text, Some(buffer), cx, o);
                     });
                 }
             }

@@ -39,6 +39,12 @@ pub struct Preferences {
     /// `FocusSelectionOnMessageCommandExecution`, on by default: `/msg`
     /// and `/notice` focus the buffer they write to.
     pub focus_on_message_command: bool,
+    /// `ControlEnterSendsMessage`, off by default: Control with the keypad
+    /// Enter sends rather than starting a new line.
+    pub control_enter_sends_message: bool,
+    /// `CommandReturnSendsMessageAsAction`, on by default: Command (here
+    /// Super) with Return or Enter sends the text as an action.
+    pub command_return_sends_action: bool,
     pub completion: Settings,
 }
 
@@ -48,6 +54,8 @@ impl Default for Preferences {
             rejoin_on_kick: false,
             input_history_per_buffer: false,
             focus_on_message_command: true,
+            control_enter_sends_message: false,
+            command_return_sends_action: true,
             completion: Settings::default(),
         }
     }

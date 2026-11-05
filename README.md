@@ -16,6 +16,8 @@ Each `--network` is a comma-separated list of `key=value` pairs and adds one net
 
 `--input-history-per-buffer true|false` (false) gives each buffer its own input history and unsent text, like Textual's `SaveInputHistoryPerSelection`; off, one history serves every buffer and the field keeps its text when the focus moves.
 
+In the input, Return sends and Up, Down, Alt+Up and Alt+Down walk the history from the first or last line. `--command-return-sends-action true|false` (true) makes Super+Return or Super+Enter send the text as an action, like Textual's "Command Return sends message as an action" (`CommandReturnSendsMessageAsAction`); off, it sends the text as typed. `--control-enter-sends-message true|false` (false) makes Control with the keypad Enter send, like Textual's `ControlEnterSendsMessage`; off, it starts a new line, as Control+Return always does.
+
 `--rejoin-on-kick true|false` (false) joins a channel again three seconds after a kick, like Textual's "Automatically rejoin a channel when kicked" preference (`RejoinChannelOnLocalKick`), which applies to every network. `--style name` picks a folder under `resources/styling/Bundled Styles` (default `Simplified`). `--help` prints the usage. The saved configuration replaces these flags in a later unit.
 
 ## Checks
