@@ -1,7 +1,7 @@
 //! The window title: what Textual's `updateTitle` shows for the focused
 //! buffer, minus the topic, which belongs to the chat view.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use textual_core::model::buffer::Body;
 use textual_core::model::network::Link;
@@ -40,6 +40,21 @@ pub fn title(ws: &Workspace, now: Instant) -> (String, String) {
         Link::Offline { .. } => "Disconnected".to_owned(),
     };
     (title, subtitle)
+}
+
+/// When the subtitle next changes on its own: the "Reconnecting in Ns"
+/// countdown of the focused network, which ticks once a second. Nothing
+/// else in the title moves without a model change, so this is `None`
+/// unless the link waits, and an idle app sleeps.
+pub fn next_tick(ws: &Workspace, now: Instant) -> Option<Instant> {
+    let (net, _) = ws.focus().and_then(|id| ws.buffer(id))?;
+    let Link::Waiting { until, .. } = net.link() else {
+        return None;
+    };
+    let left = until.saturating_duration_since(now);
+    let shown = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    let next = shown.checked_sub(1)?;
+    Some(*until - Duration::from_secs(next))
 }
 
 #[cfg(test)]
@@ -101,5 +116,40 @@ mod tests {
         );
         h.disconnect(server, conn);
         assert_eq!(title(&h.ws, now), ("peer".into(), "Disconnected".into()));
+    }
+
+    #[test]
+    fn the_reconnect_countdown_ticks_each_second_and_only_while_waiting() {
+        let mut h = Harness::new();
+        let server = h.add_network("Local");
+        let start = h.now.mono;
+        assert_eq!(next_tick(&h.ws, start), None, "offline");
+        let conn = h.connect(server);
+        h.event(
+            server,
+            conn,
+            textual_core::model::network::TransportEvent::Opened,
+        );
+        h.line(server, conn, ":s CAP * LS :x");
+        h.line(server, conn, ":s 001 textual :Welcome");
+        assert_eq!(next_tick(&h.ws, start), None, "online");
+
+        h.line(server, conn, "ERROR :Closing Link: killed");
+        let Link::Waiting { until, .. } = *h.ws.network(server).unwrap().link() else {
+            panic!("waiting");
+        };
+        let mut at = start;
+        let mut shown = vec![title(&h.ws, at).1];
+        while let Some(tick) = next_tick(&h.ws, at) {
+            assert!(tick > at && tick <= until, "{tick:?} after {at:?}");
+            at = tick;
+            shown.push(title(&h.ws, at).1);
+        }
+        assert_eq!(
+            shown,
+            [5, 4, 3, 2, 1, 0].map(|n| format!("Reconnecting in {n}s")),
+            "one change a second, down to the retry"
+        );
+        assert_eq!(at, until);
     }
 }

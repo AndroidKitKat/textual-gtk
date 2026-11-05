@@ -13,8 +13,8 @@ use textual_core::model::workspace::{Input, Out, UiAction, Workspace};
 use tokio::sync::mpsc;
 
 use crate::io::Io;
-use crate::ui::probe;
 use crate::ui::view::View;
+use crate::ui::{probe, title};
 
 /// Messages queued behind the first are taken in the same pass, up to
 /// this many, so a NAMES burst costs one render.
@@ -56,7 +56,11 @@ pub async fn run(
 ) {
     let mut quit_at: Option<Instant> = None;
     loop {
-        let deadline = [ws.next_wake(), quit_at].into_iter().flatten().min();
+        let countdown = title::next_tick(&ws, Instant::now());
+        let deadline = [ws.next_wake(), quit_at, countdown]
+            .into_iter()
+            .flatten()
+            .min();
         let first = tokio::select! {
             biased;
             request = rx.recv() => match request {
