@@ -222,3 +222,73 @@ fn configured_channels_are_parted_buffers_from_the_start() {
     }
     assert_eq!(net.next_wake(), None, "offline: nothing to wake for");
 }
+
+/// The PRIVMSG text of every line sent, in order.
+fn sent_texts(out: &Out) -> Vec<String> {
+    out.effects
+        .iter()
+        .filter_map(|(_, e)| match e {
+            Effect::Send { line, .. } => Some(line.as_str().trim_end().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_long_line_is_cut_to_what_the_server_relays() {
+    let mut h = Harness::new();
+    let server = ServerId(1);
+    h.ws.add_network(config(1, "irc.test"), &mut Out::default());
+    let conn = h.register(server);
+    let words: Vec<String> = (0..300).map(|i| format!("w{i}")).collect();
+    let text = words.join(" ");
+    let typed = |h: &mut Harness, buffer| {
+        h.input(Input::Ui(UiAction::Submit {
+            buffer,
+            text: text.clone(),
+            confirmed: false,
+        }))
+    };
+    h.line(
+        server,
+        conn,
+        ":textual!~me@a.very.long.host.example JOIN #c",
+    );
+    let c = h.buffer(server, "#c");
+    let parts = |out: &Out| -> Vec<String> {
+        sent_texts(out)
+            .into_iter()
+            .filter_map(|l| l.strip_prefix("PRIVMSG #c :").map(str::to_owned))
+            .collect()
+    };
+    let out = typed(&mut h, c);
+    let known = parts(&out);
+    assert!(known.len() > 1);
+    for part in &known {
+        let relayed = format!(":textual!~me@a.very.long.host.example PRIVMSG #c :{part}\r\n");
+        assert!(relayed.len() <= 512, "{}", relayed.len());
+    }
+    // The space a part was cut at starts the next part.
+    assert!(known[1].starts_with(' '));
+    assert_eq!(known.concat(), text);
+    // Each part is printed as it is sent.
+    let lines = h.ws.buffer(c).unwrap().1.scrollback().len();
+    assert!(lines >= known.len());
+
+    // Before our host is known, the longest one is assumed.
+    let mut h = Harness::new();
+    h.ws.add_network(config(1, "irc.test"), &mut Out::default());
+    let conn = h.register(server);
+    h.line(server, conn, ":textual JOIN #c");
+    let c = h.buffer(server, "#c");
+    let unknown = parts(&typed(&mut h, c));
+    assert!(unknown.len() >= known.len());
+    for part in &unknown {
+        assert!(
+            part.len() <= 512 - (1 + 7 + 1 + 74 + 9 + 2 + 2) - 2,
+            "{}",
+            part.len()
+        );
+    }
+    assert_eq!(unknown.concat(), text);
+}

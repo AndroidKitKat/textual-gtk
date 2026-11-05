@@ -1,0 +1,25 @@
+# More than four lines asks first (Textual's possible-flood alert); the
+# question comes after the text went into the history. A yes sends every
+# line. Four lines go out at once.
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+! type #c one\ntwo\nthree\nfour\nfive
+? ui confirm-flood #c one\ntwo\nthree\nfour\nfive
+? lines #c 1
+! confirm
+> PRIVMSG #c one
+> PRIVMSG #c two
+> PRIVMSG #c three
+> PRIVMSG #c four
+> PRIVMSG #c five
+? line #c <textual> five
+! type #c a\r\nb\n/topic t
+> PRIVMSG #c a
+> PRIVMSG #c b
+> TOPIC #c t
+! up
+? field a\r\nb\n/topic t|
+! up
+? field one\ntwo\nthree\nfour\nfive|
+? registered textual

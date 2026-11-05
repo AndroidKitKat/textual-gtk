@@ -1,0 +1,97 @@
+# Textual's commands, typed in a channel, a query and the console.
+! welcome
+< :irc.test 005 textual CHANTYPES=# PREFIX=(ov)@+ :are supported by this server
+! type console join new
+> JOIN #new
+? buffers = console #new
+? focus #new
+? parted #new
+< :textual!u@h JOIN #new
+> MODE #new
+? joined #new
+! type #new /j #other,#third key
+> JOIN #other,#third key
+? focus #other
+? buffers = console #new #other
+! type #other /join #new
+? focus #new
+! type #new /join
+? focus #new
+! type #new /msg bob hello bob
+> PRIVMSG bob :hello bob
+? buffers = console #new #other bob
+? focus bob
+? line bob <textual> hello bob
+! type bob /me waves
+> PRIVMSG bob :ACTION waves
+? line bob * textual waves
+! type bob /notice #new heads up
+> NOTICE #new :heads up
+? line #new -textual- heads up
+? focus #new
+! type #new /msg #nowhere psst
+> PRIVMSG #nowhere psst
+? focus #new
+! type #new /nick renamed
+> NICK renamed
+! type #new /topic hello world
+> TOPIC #new :hello world
+! type #new /t
+> TOPIC #new
+! type #new /mode +m
+> MODE #new +m
+! type #new /mode bob +i
+> MODE bob +i
+! type #new /m #other +o bob
+> MODE #other +o bob
+! type #new /kick bob
+> KICK #new bob :Your behavior is not conducive to the desired environment.
+! type #new /kick #other bob go away
+> KICK #other bob :go away
+! type #new /invite bob carol
+> INVITE bob #new
+> INVITE carol #new
+! type #new /whois bob
+> WHOIS bob bob
+! type bob /whois
+> WHOIS bob bob
+! type #new /away
+> AWAY :Be back later
+< :irc.test 306 textual :You have been marked as being away
+! type #new /away
+> AWAY
+! type #new /raw PRIVMSG #x :raw line
+> PRIVMSG #x :raw line
+! type #new /quote
+? line #new Invalid syntax: “QUOTE <input>“
+! type #new /foo bar baz
+> FOO bar baz
+! type #new /query
+? line #new Invalid syntax: “QUERY <nickname>“
+! type #new /query #chan
+? line #new One or more arguments are not properly formatted for this command.
+! type #new /query carol hi carol
+> PRIVMSG carol :hi carol
+? focus carol
+! type carol /part
+? buffers = console #new #other bob
+? focus bob
+! type bob /close nothere
+? line bob Cannot find channel named “nothere“
+! type bob /close
+? buffers = console #new #other
+? focus #other
+! type #new /part
+> PART #new :Textual GTK
+! type #new /leave #other bye now
+> PART #other :bye now
+! type console /kick bob
+? line console This command can only be used with a channel.
+? notice This command can only be used with a channel.
+! type console /part
+! type console /me waves at carol
+> PRIVMSG waves :ACTION at carol
+? buffers = console #new #other waves
+! type console quit see you
+> QUIT :see you
+? quitting

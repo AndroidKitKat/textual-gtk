@@ -32,7 +32,7 @@
 ? focus #a
 # Closing a joined channel leaves it.
 ! close #a
-> PART #a
+> PART #a :Textual GTK
 ? buffers = console
 ? focus console
 ! close console

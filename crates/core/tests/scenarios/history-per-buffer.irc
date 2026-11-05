@@ -1,0 +1,31 @@
+# With SaveInputHistoryPerSelection each buffer has its own history and
+# keeps its own unsent text across focus changes.
+= history-per-buffer on
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+< :textual!u@h JOIN #d
+> MODE #d
+! focus #c
+! field in c|
+! return
+> PRIVMSG #c :in c
+! field half typed|
+! focus #d
+? ui input |
+? field |
+! up
+? field |
+! field for d|
+! focus #c
+? field half typed|
+! up
+? field in c|
+! focus #d
+? field for d|
+! close #d
+> PART #d :Textual GTK
+! focus #c
+! focus console
+? field |
+? registered textual

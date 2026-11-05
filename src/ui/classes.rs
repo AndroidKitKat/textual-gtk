@@ -13,6 +13,7 @@ pub const BADGE: &str = "tx-badge";
 pub const MEMBER_LIST: &str = "tx-member-list";
 pub const MEMBER_ROW: &str = "tx-member-row";
 pub const INPUT: &str = "tx-input";
+pub const FLOOD_QUESTION: &str = "tx-flood-question";
 
 const KIND_CHANNEL: &str = "kind-channel";
 const KIND_QUERY: &str = "kind-query";

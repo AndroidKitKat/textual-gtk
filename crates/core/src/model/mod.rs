@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Local};
 
+use crate::input::completion::Settings;
 use crate::line::{Line, LineId, Stamp};
 use buffer::BufferId;
 use members::MemberDiff;
@@ -24,13 +25,37 @@ pub struct Now {
 }
 
 /// Textual's application-wide preferences that the model follows. They
-/// are global in Textual (`TPCPreferences`), not per server.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// are global in Textual (`TPCPreferences`), not per server. `Default` is
+/// Textual's defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preferences {
     /// `RejoinChannelOnLocalKick`, off by default: join a channel again
     /// three seconds after being kicked from it.
     pub rejoin_on_kick: bool,
+    /// `SaveInputHistoryPerSelection`, off by default: each buffer keeps
+    /// its own history and its unsent text. Off, one history serves every
+    /// buffer and the field keeps its text across a focus change.
+    pub input_history_per_buffer: bool,
+    /// `FocusSelectionOnMessageCommandExecution`, on by default: `/msg`
+    /// and `/notice` focus the buffer they write to.
+    pub focus_on_message_command: bool,
+    pub completion: Settings,
 }
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Preferences {
+            rejoin_on_kick: false,
+            input_history_per_buffer: false,
+            focus_on_message_command: true,
+            completion: Settings::default(),
+        }
+    }
+}
+
+/// The comment sent with QUIT, PART and `/close` when none is typed:
+/// Textual's `normalLeavingComment`, with this client's name.
+pub const LEAVING_COMMENT: &str = "Textual GTK";
 
 /// A model fact the view reacts to. Most carry only an id and the view
 /// reads the rest from the workspace; a line and a member diff carry their
@@ -80,7 +105,7 @@ impl Ids {
 pub(crate) struct Cx<'a> {
     pub now: Now,
     pub ids: &'a mut Ids,
-    pub prefs: Preferences,
+    pub prefs: &'a Preferences,
 }
 
 impl Cx<'_> {

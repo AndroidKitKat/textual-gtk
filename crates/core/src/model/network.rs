@@ -9,15 +9,16 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::input::split::{budget, split_for_wire};
 use crate::irc::casemap::CaseMapping;
 use crate::irc::isupport::Isupport;
 use crate::irc::join::join_lines;
 use crate::irc::{Message, WireLine};
 use crate::line::{Destination, Line, LineType};
-use crate::model::buffer::{Body, BufferId, Buffers, Rejoin};
+use crate::model::buffer::{BufferId, Buffers, Rejoin};
 use crate::model::registration::{self, Failure, Progress, Registration, Setup, SetupError};
 use crate::model::session::Session;
-use crate::model::{Change, Cx, Ids};
+use crate::model::{Change, Cx, Ids, LEAVING_COMMENT};
 
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(240);
 /// Textual's `_pingInterval` and `_timeoutInterval`: silence for this long
@@ -35,6 +36,17 @@ const STABLE_ONLINE: Duration = Duration::from_secs(60);
 /// Longer than the transport's own 30 s connect timeout.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(45);
 const PING_TOKEN: &str = "textual-gtk";
+/// Textual's `IRC[6rj-2r]`.
+pub(crate) const NOT_CONNECTED: &str = "Failed to send data to server. Not connected.";
+
+/// How a message goes out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Speech {
+    Privmsg,
+    /// `/me`: a PRIVMSG wrapped in CTCP ACTION.
+    Action,
+    Notice,
+}
 
 /// Stable identity of a configured server; seeds the backoff jitter so two
 /// networks that drop together do not retry in step.
@@ -759,54 +771,132 @@ impl Network {
         }
     }
 
-    /// Sends a message typed into `buffer`. Without echo-message it is
-    /// printed here; with it, the server's echo prints it.
-    pub(crate) fn say(&mut self, buffer: BufferId, text: &str, cx: &mut Cx, out: &mut Out) {
-        let Some(target) = self.buffers.get(buffer).map(|b| b.name().to_owned()) else {
-            return;
-        };
-        let refusal = match (&self.link, self.buffers.get(buffer)) {
-            (_, Some(b)) if b.is_console() => Some("Messages cannot be sent to this window."),
-            (Link::Online { .. }, Some(b))
-                if b.joined().is_some() || matches!(b.body(), Body::Query) =>
-            {
-                None
+    /// Textual's `isLoggedIn`: registered.
+    pub fn is_logged_in(&self) -> bool {
+        matches!(self.link, Link::Online { .. })
+    }
+
+    /// Textual's `isConnected`: a socket is up, registered or not.
+    pub fn is_connected(&self) -> bool {
+        matches!(
+            self.link,
+            Link::Registering { .. } | Link::Online { .. } | Link::Quitting { .. }
+        )
+    }
+
+    /// Our nick: the session's, or the configured one before 001.
+    pub fn nick(&self) -> &str {
+        self.session()
+            .map_or(self.config.setup.nick.as_str(), Session::nick)
+    }
+
+    pub fn casemap(&self) -> CaseMapping {
+        self.session()
+            .map_or_else(CaseMapping::default, Session::casemap)
+    }
+
+    /// Textual's `sendLine:`: without a socket the line is dropped and the
+    /// console says so (`IRCClient.m:2659-2674`).
+    pub(crate) fn send_line(&mut self, line: WireLine, cx: &mut Cx, out: &mut Out) {
+        match self.conn().filter(|_| self.is_connected()) {
+            Some(conn) => out.effects.push(Effect::Send { conn, line }),
+            None => {
+                let console = self.buffers.console().id();
+                self.print_client(console, NOT_CONNECTED, cx, out);
             }
-            (Link::Online { .. }, _) => Some("You are not in this channel."),
-            _ => Some("Not connected."),
-        };
-        if let Some(text) = refusal {
-            let line = Line::client(cx.stamp(), text.to_owned());
-            self.buffers.print(buffer, line, &mut out.changes);
-            return;
-        }
-        let Link::Online { conn, session, .. } = &self.link else {
-            return;
-        };
-        let line = match Message::new("PRIVMSG", &[&target, text]).to_wire() {
-            Ok(line) => line,
-            Err(e) => {
-                let line = Line::client(cx.stamp(), format!("Not sent: {e}"));
-                self.buffers.print(buffer, line, &mut out.changes);
-                return;
-            }
-        };
-        out.effects.push(Effect::Send { conn: *conn, line });
-        if !session.caps().is_enabled("echo-message") {
-            let mut line = Line::new(
-                cx.stamp(),
-                LineType::Privmsg,
-                "PRIVMSG",
-                Some(session.nick()),
-                text.to_owned(),
-            );
-            line.from_self = true;
-            self.buffers.print(buffer, line, &mut out.changes);
         }
     }
 
-    /// Closes a channel or query buffer, leaving the channel if we are in
-    /// it. The console stays.
+    /// Prints a line the client says itself into `buffer`.
+    pub(crate) fn print_client(
+        &mut self,
+        buffer: BufferId,
+        text: &str,
+        cx: &mut Cx,
+        out: &mut Out,
+    ) {
+        let line = Line::client(cx.stamp(), text.to_owned());
+        self.buffers.print(buffer, line, &mut out.changes);
+    }
+
+    /// Textual's `sendText:asCommand:toChannel:` and the send half of
+    /// `/msg`: cuts `text` to fit the wire, sends each part to `target`,
+    /// and prints it into `echo` unless the server echoes our messages.
+    pub(crate) fn send_text(
+        &mut self,
+        target: &str,
+        speech: Speech,
+        text: &str,
+        echo: Option<BufferId>,
+        cx: &mut Cx,
+        out: &mut Out,
+    ) {
+        let (command, kind) = match speech {
+            Speech::Privmsg => ("PRIVMSG", LineType::Privmsg),
+            Speech::Action => ("PRIVMSG", LineType::Action),
+            Speech::Notice => ("NOTICE", LineType::Notice),
+        };
+        let nick = self.nick().to_owned();
+        let user_host = self
+            .session()
+            .and_then(Session::hostmask)
+            .map(str::to_owned);
+        let echoed = self
+            .session()
+            .is_some_and(|s| s.caps().is_enabled("echo-message"));
+        let casemap = self.casemap();
+        let room = budget(
+            &nick,
+            user_host.as_deref(),
+            command,
+            target,
+            speech == Speech::Action,
+        );
+        for part in split_for_wire(text, room) {
+            if !echoed && let Some(buffer) = echo {
+                let mut line = Line::new(cx.stamp(), kind, command, Some(&nick), part.clone());
+                line.from_self = true;
+                let now = cx.now.mono;
+                self.buffers
+                    .converse(buffer, &line, &nick, casemap, false, now);
+                self.buffers.print(buffer, line, &mut out.changes);
+            }
+            let body = match speech {
+                Speech::Action => format!("\x01ACTION {part}\x01"),
+                _ => part,
+            };
+            match Message::new(command, &[target, &body]).to_wire() {
+                Ok(line) => self.send_line(line, cx, out),
+                Err(e) => {
+                    let console = self.buffers.console().id();
+                    self.print_client(console, &format!("Not sent: {e}"), cx, out);
+                }
+            }
+        }
+    }
+
+    /// The query with `nick`, opened if there is none.
+    pub(crate) fn open_query(&mut self, nick: &str, ids: &mut Ids, out: &mut Out) -> BufferId {
+        match self.buffers.find_query(self.casemap(), nick) {
+            Some(id) => id,
+            None => self.buffers.add_query(ids.buffer(), nick, &mut out.changes),
+        }
+    }
+
+    /// The buffer of channel `name`, added parted if there is none, as
+    /// Textual's `findChannelOrCreate` does before a JOIN goes out.
+    pub(crate) fn open_channel(&mut self, name: &str, ids: &mut Ids, out: &mut Out) -> BufferId {
+        match self.buffers.find_channel(self.casemap(), name) {
+            Some(id) => id,
+            None => self
+                .buffers
+                .add_channel(ids.buffer(), name, Rejoin::No, &mut out.changes),
+        }
+    }
+
+    /// Closes a channel or query buffer, leaving the channel with the
+    /// leaving comment if we are in it (Textual's `destroyChannel:`). The
+    /// console stays.
     pub(crate) fn close(&mut self, buffer: BufferId, out: &mut Out) {
         let Some(b) = self.buffers.get(buffer) else {
             return;
@@ -816,7 +906,7 @@ impl Network {
         }
         if b.joined().is_some()
             && let Link::Online { conn, .. } = &self.link
-            && let Ok(line) = Message::new("PART", &[b.name()]).to_wire()
+            && let Ok(line) = Message::new("PART", &[b.name(), LEAVING_COMMENT]).to_wire()
         {
             out.effects.push(Effect::Send { conn: *conn, line });
         }

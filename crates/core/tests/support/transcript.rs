@@ -19,7 +19,7 @@ use textual_core::model::network::{
     TransportEvent,
 };
 use textual_core::model::registration::Auth;
-use textual_core::model::workspace::{Input, Out, UiAction, Workspace};
+use textual_core::model::workspace::{Input, Out, UiAction, UiEffect, Workspace};
 use textual_core::model::{Change, Now, Preferences};
 use textual_core::secret::Secret;
 
@@ -33,6 +33,12 @@ pub struct Driver {
     latest: Option<ConnId>,
     sent: VecDeque<String>,
     notices: VecDeque<String>,
+    /// UI effects not yet checked, as `? ui` shows them.
+    ui: VecDeque<String>,
+    /// The input field as a view would hold it: text and caret.
+    field: (String, usize),
+    /// The text of the last flood question, for `! confirm`.
+    flood: Option<(BufferId, String)>,
     view: View,
     /// Where the view built from changes disagreed with the workspace.
     drift: Vec<String>,
@@ -52,6 +58,9 @@ impl Driver {
             latest: None,
             sent: VecDeque::new(),
             notices: VecDeque::new(),
+            ui: VecDeque::new(),
+            field: (String::new(), 0),
+            flood: None,
             view: View::default(),
             drift: Vec::new(),
             hide,
@@ -100,6 +109,25 @@ impl Driver {
                 Effect::Hangup { conn } => format!("hangup {conn}"),
             };
             self.sent.push_back(item);
+        }
+        for effect in out.ui {
+            match effect {
+                UiEffect::SetInput { was, text, caret } => {
+                    if was == self.field.0 {
+                        self.field = (text, caret);
+                    }
+                    self.ui
+                        .push_back(format!("input {}", show_field(&self.field)));
+                }
+                UiEffect::ConfirmFlood { buffer, text } => {
+                    self.ui.push_back(format!(
+                        "confirm-flood {} {}",
+                        self.label(buffer),
+                        escape(&text)
+                    ));
+                    self.flood = Some((buffer, text));
+                }
+            }
         }
         let console = self.network().buffers().console().id();
         for change in &out.changes {
@@ -473,17 +501,24 @@ pub fn run_transcript_hiding(source: &str, hide: fn(&Change) -> bool) -> Result<
             if driver.is_some() {
                 return Err(format!("{n}: configuration after the first exchange"));
             }
-            match rest.strip_prefix("rejoin-on-kick ") {
-                Some("on") => prefs.rejoin_on_kick = true,
-                Some("off") => prefs.rejoin_on_kick = false,
-                Some(other) => return Err(format!("{n}: rejoin-on-kick {other:?}: on or off")),
-                None => configure(&mut config, rest).map_err(|e| format!("{n}: {e}"))?,
+            let (key, value) = rest.split_once(' ').unwrap_or((rest, ""));
+            let on = || match value {
+                "on" => Ok(true),
+                "off" => Ok(false),
+                other => Err(format!("{n}: {key} {other:?}: on or off")),
+            };
+            match key {
+                "rejoin-on-kick" => prefs.rejoin_on_kick = on()?,
+                "history-per-buffer" => prefs.input_history_per_buffer = on()?,
+                "focus-on-message" => prefs.focus_on_message_command = on()?,
+                "completion-suffix" => prefs.completion.suffix = Some(unescape(value)),
+                _ => configure(&mut config, rest).map_err(|e| format!("{n}: {e}"))?,
             }
             continue;
         }
 
         let t = driver.get_or_insert_with(|| {
-            let mut t = Driver::new(config.clone(), prefs, hide);
+            let mut t = Driver::new(config.clone(), prefs.clone(), hide);
             if !matches!(kind, "!" | "@") {
                 t.net(network::Input::Connect);
                 t.transport(t.latest.expect("dialed"), TransportEvent::Opened);
@@ -669,13 +704,74 @@ fn event(t: &mut Driver, rest: &str) -> Result<(), String> {
             ui(t, UiAction::Close(id));
             return Ok(());
         }
-        "say" => {
-            let (name, text) = arg.split_once(' ').ok_or("say <buffer> text")?;
+        "type" => {
+            let (name, text) = arg.split_once(' ').ok_or("type <buffer> text")?;
             let buffer = t.buffer(name)?.id();
-            t.input(Input::Say {
-                buffer,
-                text: text.to_owned(),
-            });
+            ui(
+                t,
+                UiAction::Submit {
+                    buffer,
+                    text: unescape(text),
+                    confirmed: false,
+                },
+            );
+            return Ok(());
+        }
+        "confirm" => {
+            let (buffer, text) = t.flood.take().ok_or("no flood question to confirm")?;
+            ui(
+                t,
+                UiAction::Submit {
+                    buffer,
+                    text,
+                    confirmed: true,
+                },
+            );
+            return Ok(());
+        }
+        "field" => {
+            let caret = arg.find('|').ok_or("field text with a | for the caret")?;
+            let text = unescape(&arg.replace('|', ""));
+            let caret = unescape(&arg[..caret]).chars().count();
+            t.field = (text.clone(), caret);
+            ui(t, UiAction::Draft(text));
+            return Ok(());
+        }
+        "tab" | "shift-tab" => {
+            let (text, caret) = t.field.clone();
+            ui(
+                t,
+                UiAction::Complete {
+                    text,
+                    selection: (caret, caret),
+                    backward: what == "shift-tab",
+                },
+            );
+            return Ok(());
+        }
+        "up" | "down" => {
+            let text = t.field.0.clone();
+            ui(
+                t,
+                UiAction::History {
+                    text,
+                    older: what == "up",
+                },
+            );
+            return Ok(());
+        }
+        "return" => {
+            let buffer = t.ws.focus().ok_or("no focus")?;
+            let text = std::mem::take(&mut t.field).0;
+            ui(t, UiAction::Draft(String::new()));
+            ui(
+                t,
+                UiAction::Submit {
+                    buffer,
+                    text,
+                    confirmed: false,
+                },
+            );
             return Ok(());
         }
         "collapse" | "expand" => {
@@ -772,6 +868,42 @@ fn show(d: Duration) -> String {
             .trim_end_matches('0')
             .to_owned()
     }
+}
+
+/// `\n`, `\r`, `\t`, `\\` and `\xHH` in a script's typed text.
+fn unescape(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                out.push(char::from(u8::from_str_radix(&hex, 16).expect("\\xHH")));
+            }
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn escape(text: &str) -> String {
+    text.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+fn show_field((text, caret): &(String, usize)) -> String {
+    let at = text
+        .char_indices()
+        .nth(*caret)
+        .map_or(text.len(), |(i, _)| i);
+    escape(&format!("{}|{}", &text[..at], &text[at..]))
 }
 
 fn is_end_state(query: &str) -> bool {
@@ -923,6 +1055,17 @@ fn check_query(t: &mut Driver, query: &str) -> Option<String> {
     let link = net.link();
     let session = net.session();
     let holds = match what {
+        "ui" => {
+            return match t.ui.pop_front() {
+                Some(got) if got == arg => None,
+                Some(got) => Some(format!("ui {got:?}")),
+                None => Some("no ui effect".to_owned()),
+            };
+        }
+        "field" => {
+            let got = show_field(&t.field);
+            return (got != arg).then(|| format!("field {got:?}"));
+        }
         "notice" => {
             return match t.notices.pop_front() {
                 Some(notice) if notice == arg => None,

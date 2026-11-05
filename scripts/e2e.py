@@ -9,7 +9,10 @@ clicks from an actions file. A second and third client talk to it. Checks:
 autojoin on both networks, the message path through the page, badges and
 highlights on an unfocused channel, the member list following NAMES, JOIN,
 MODE and PART, collapsing the focused buffer's server, two selections in
-one tick, the page's view type (server, channel, query), an opaque header
+one tick, the page's view type (server, channel, query), typing a line
+that the talker receives and the page shows, Up recalling it, Tab
+completing a nick, a five-line paste that asks first, /join adding a
+row, an opaque header
 bar and input strip, a page reload, a killed web process, a clean QUIT
 from both nicks when the window closes, and no GLib criticals or warnings
 from the app. A second, short run against a fake server checks that
@@ -165,6 +168,17 @@ class Probe:
         return self.wait_until(lambda s: predicate(s["view"]), what, timeout)["view"]
 
 
+def app_env(prefix):
+    """The app's environment, cut off from the desktop: xvfb-run sets its
+    own DISPLAY, and without WAYLAND_DISPLAY and the session bus GTK can
+    neither open a window on the real screen nor reach the real session."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS")}
+    env.update(TEXTUAL_GTK_PROBE=str(prefix), GSK_RENDERER="cairo", GTK_A11Y="none",
+               GDK_BACKEND="x11", GSETTINGS_BACKEND="memory")
+    return env
+
+
 def cpu_seconds(pid):
     fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
     return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
@@ -244,7 +258,7 @@ def fake_server_checks(binary, out, bus_config, checks):
         prefix.with_suffix(suffix).unlink(missing_ok=True)
     log = out / "app.log"
     server = FakeServer()
-    env = dict(os.environ, TEXTUAL_GTK_PROBE=str(prefix), GSK_RENDERER="cairo", GTK_A11Y="none")
+    env = app_env(prefix)
     app = subprocess.Popen(
         ["dbus-run-session", f"--config-file={bus_config}", "--",
          "xvfb-run", "-a", "-s", "-screen 0 1100x700x24", str(binary),
@@ -338,7 +352,7 @@ def main():
     for c in (channel, channel2, channel3):
         talker.join(c)
 
-    env = dict(os.environ, TEXTUAL_GTK_PROBE=str(prefix), GSK_RENDERER="cairo", GTK_A11Y="none")
+    env = app_env(prefix)
     app = subprocess.Popen(
         ["dbus-run-session", f"--config-file={bus_config}", "--",
          "xvfb-run", "-a", "-s", "-screen 0 1100x700x24", str(binary),
@@ -497,6 +511,43 @@ def main():
             lambda s: s["view"]["focus"] == f"Local/{talker_nick}" and s["page"] and f"a query {token}" in s["page"]["last"],
             "the query page to show the message")["page"]
         checks["the query page is a query view without a topic bar"] = query["viewType"] == "query" and not query["hasTopicBar"]
+
+        probe.act({"select": f"Local/{channel}"})
+        probe.wait_view(lambda v: v["focus"] == f"Local/{channel}", "the channel to take the focus for typing")
+        typed = f"typed in e2e {token}"
+        probe.act({"input": [typed, len(typed)]}, {"key": "Return"})
+        heard = talker.wait_for(lambda l: l.startswith(f":{app_nick}!") and f"PRIVMSG {channel} :{typed}" in l, 15)
+        checks["a typed line reaches the server"] = heard is not None
+        page = probe.wait_page(lambda p: typed in p["last"], "the typed line in the page")
+        checks["a typed line shows in the page as ours"] = f"<{app_nick}>" in page["last"]
+        checks["Return empties the input"] = probe.state()["view"]["input"]["text"] == ""
+        probe.act({"key": "Up"})
+        view = probe.wait_view(lambda v: v["input"]["text"] == typed, "Up to recall the last line")
+        checks["Up recalls the last line, caret at its end"] = view["input"]["caret"] == len(typed)
+        partial = f"hi {talker_nick[:6]}"
+        probe.act({"input": [partial, len(partial)]}, {"key": "Tab"})
+        view = probe.wait_view(lambda v: v["input"]["text"].startswith(partial) and v["input"]["text"] != partial,
+                               "Tab to complete the nick")
+        checks["Tab completes a member's nick"] = view["input"] == {"text": f"hi {talker_nick} ", "caret": len(f"hi {talker_nick} ")}
+        if not checks["Tab completes a member's nick"]:
+            print(f"     completed to {view['input']}")
+
+        pasted = [f"paste {i} {token}" for i in range(5)]
+        probe.act({"input": ["\n".join(pasted), 0]}, {"key": "Return"})
+        view = probe.wait_view(lambda v: v["flood_question"] is not None, "the flood question")
+        checks["a five-line paste asks first"] = view["flood_question"] == "\n".join(pasted)
+        checks["nothing is sent before the answer"] = talker.wait_for(lambda l: f"paste 0 {token}" in l, 2) is None
+        probe.act({"answer_flood": True})
+        got = [talker.wait_for(lambda l, x=x: f"PRIVMSG {channel} :{x}" in l, 15) for x in pasted]
+        checks["a yes sends every pasted line, in order"] = all(got)
+        probe.wait_view(lambda v: v["flood_question"] is None, "the question to go away once answered")
+
+        joined = f"#e2e-{token}-j"
+        probe.act({"input": [f"/join {joined}", 0]}, {"key": "Return"})
+        view = probe.wait_view(
+            lambda v: row(v, f"Local/{joined}") and "state-joined" in row(v, f"Local/{joined}")["classes"],
+            "the row of the channel /join joined")
+        checks["/join adds the channel's row and focuses it"] = view["focus"] == f"Local/{joined}"
 
         checks["snapshot written"] = snapshot.exists() and snapshot.stat().st_size > 5000
 

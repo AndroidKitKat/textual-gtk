@@ -4,6 +4,7 @@
 //! one, so the view never sorts.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::irc::casemap::{CaseMapping, NickKey};
 
@@ -119,9 +120,59 @@ impl Slot {
     }
 }
 
+/// How much we have talked with a member lately, for the order of Tab
+/// completion: Textual's `IRCChannelUser` weights (`IRCChannelUser.m:213-258`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Weight {
+    incoming: f64,
+    outgoing: f64,
+    /// Textual starts this when the member is added; here it starts at the
+    /// first bump or read, so a member who joined long before speaking is
+    /// not faded by the time before.
+    last_fade: Option<Instant>,
+}
+
+impl Weight {
+    /// `outgoingConversation`: the member mentioned us, or we them.
+    fn outgoing(&mut self, now: Instant) {
+        self.last_fade.get_or_insert(now);
+        self.outgoing += if self.outgoing.round_ties_even() == 0.0 {
+            20.0
+        } else {
+            5.0
+        };
+    }
+
+    /// `conversation`: the member spoke, or someone else mentioned them.
+    fn incoming(&mut self, now: Instant) {
+        self.last_fade.get_or_insert(now);
+        self.incoming += if self.incoming.round_ties_even() == 0.0 {
+            4.0
+        } else {
+            1.0
+        };
+    }
+
+    /// `totalWeight`. Reading fades it: halved per minute since the last
+    /// fade, applied only once more than a minute has passed.
+    fn total(&mut self, now: Instant) -> f64 {
+        let since = *self.last_fade.get_or_insert(now);
+        let minutes = now.saturating_duration_since(since).as_secs_f64() / 60.0;
+        if minutes > 1.0 {
+            self.last_fade = Some(now);
+            let factor = 2f64.powf(minutes);
+            self.incoming /= factor;
+            self.outgoing /= factor;
+        }
+        self.incoming + self.outgoing
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Members {
     by_key: HashMap<NickKey, Member>,
+    /// Absent for a member nobody has talked with.
+    weights: HashMap<NickKey, Weight>,
     /// Always sorted. Positions in `MemberDiff` index this.
     order: Vec<Slot>,
 }
@@ -173,6 +224,7 @@ impl Members {
 
     pub(crate) fn remove(&mut self, key: &NickKey) -> Option<MemberDiff> {
         let member = self.by_key.remove(key)?;
+        self.weights.remove(key);
         let at = self.position(&Slot::of(key, &member));
         self.order.remove(at);
         Some(MemberDiff::Remove { at })
@@ -211,16 +263,52 @@ impl Members {
     /// last entry.
     pub(crate) fn replace_all(&mut self, entries: Vec<(NickKey, Member)>) -> MemberDiff {
         self.by_key = entries.into_iter().collect();
+        self.weights.retain(|k, _| self.by_key.contains_key(k));
         self.resort();
         MemberDiff::Reset
     }
 
     /// Re-keys every member under a new casemap.
     pub(crate) fn rekey(&mut self, casemap: CaseMapping) -> MemberDiff {
-        let members = std::mem::take(&mut self.by_key).into_values();
-        self.by_key = members.map(|m| (casemap.nick(&m.nick), m)).collect();
+        let mut weights = std::mem::take(&mut self.weights);
+        let members = std::mem::take(&mut self.by_key);
+        for (old, m) in members {
+            let key = casemap.nick(&m.nick);
+            if let Some(w) = weights.remove(&old) {
+                self.weights.insert(key.clone(), w);
+            }
+            self.by_key.insert(key, m);
+        }
         self.resort();
         MemberDiff::Reset
+    }
+
+    /// A member spoke (`IRCClient.m:6510-6521`) or was named in a line
+    /// (`TVCLogController.m:1289-1294`): `toward_us` is Textual's
+    /// `outgoingConversation`, else its `conversation`.
+    pub(crate) fn converse(&mut self, key: &NickKey, toward_us: bool, now: Instant) {
+        if !self.by_key.contains_key(key) {
+            return;
+        }
+        let weight = self.weights.entry(key.clone()).or_default();
+        if toward_us {
+            weight.outgoing(now);
+        } else {
+            weight.incoming(now);
+        }
+    }
+
+    /// Each member in display order with its weight, faded to `now`.
+    pub(crate) fn weighed(&mut self, now: Instant) -> Vec<(String, f64)> {
+        let mut out = Vec::with_capacity(self.order.len());
+        for slot in &self.order {
+            let weight = self
+                .weights
+                .get_mut(&slot.key)
+                .map_or(0.0, |w| w.total(now));
+            out.push((self.by_key[&slot.key].nick.clone(), weight));
+        }
+        out
     }
 
     fn resort(&mut self) {
@@ -248,6 +336,9 @@ impl Members {
         let from = self.position(&Slot::of(old, before));
         self.order.remove(from);
         self.by_key.remove(old);
+        if let Some(w) = self.weights.remove(old) {
+            self.weights.insert(new.clone(), w);
+        }
         let slot = Slot::of(&new, &member);
         let to = self.order.binary_search(&slot).unwrap_err();
         let row = row(&member, prefix);
@@ -433,5 +524,49 @@ mod tests {
         m.rekey(CaseMapping::Ascii);
         assert!(m.contains(&CaseMapping::Ascii.nick("X[")));
         assert!(!m.contains(&CaseMapping::Ascii.nick("x{")));
+    }
+    #[test]
+    fn weights_bump_like_textual_and_halve_per_minute_on_read() {
+        use std::time::Duration;
+        let cm = CaseMapping::Rfc1459;
+        let t0 = Instant::now();
+        let mut m = Members::default();
+        for nick in ["a", "b"] {
+            let (k, v) = member(nick, &[]);
+            m.insert(k, v, &[]);
+        }
+        let a = cm.nick("a");
+        m.converse(&a, false, t0);
+        m.converse(&a, false, t0);
+        m.converse(&a, true, t0);
+        m.converse(&a, true, t0);
+        m.converse(&cm.nick("nobody"), true, t0);
+        assert_eq!(
+            m.weighed(t0),
+            [
+                ("a".to_owned(), 4.0 + 1.0 + 20.0 + 5.0),
+                ("b".to_owned(), 0.0)
+            ]
+        );
+        // Within a minute nothing fades, and the clock is not restarted.
+        assert_eq!(m.weighed(t0 + Duration::from_secs(50))[0].1, 30.0);
+        assert_eq!(m.weighed(t0 + Duration::from_secs(120))[0].1, 7.5);
+        assert_eq!(m.weighed(t0 + Duration::from_secs(150))[0].1, 7.5);
+    }
+
+    #[test]
+    fn weights_follow_renames_and_go_with_the_member() {
+        let cm = CaseMapping::Rfc1459;
+        let t0 = Instant::now();
+        let mut m = Members::default();
+        let (k, v) = member("a", &[]);
+        m.insert(k, v, &[]);
+        m.converse(&cm.nick("a"), false, t0);
+        m.rename(&cm.nick("a"), cm.nick("z"), "z", &[]);
+        assert_eq!(m.weighed(t0), [("z".to_owned(), 4.0)]);
+        m.remove(&cm.nick("z"));
+        let (k, v) = member("z", &[]);
+        m.insert(k, v, &[]);
+        assert_eq!(m.weighed(t0), [("z".to_owned(), 0.0)]);
     }
 }

@@ -14,13 +14,13 @@ use gtk::glib;
 use textual_core::model::Change;
 use textual_core::model::buffer::{Body, BufferId};
 use textual_core::model::members::MemberDiff;
-use textual_core::model::network::Link;
-use textual_core::model::workspace::{Input, UiAction, Workspace};
+use textual_core::model::workspace::{Input, UiAction, UiEffect, Workspace};
 use textual_core::style::{Style, ViewKind};
 
 use crate::app::{Inbox, Request};
 use crate::ui::chat_view::ChatView;
 use crate::ui::classes;
+use crate::ui::input::InputBar;
 use crate::ui::member_list::MemberList;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::title;
@@ -32,11 +32,11 @@ pub struct View {
     members: MemberList,
     stack: gtk::Stack,
     chats: HashMap<BufferId, ChatView>,
-    entry: gtk::Entry,
+    input: InputBar,
     style: Rc<Style>,
     pages: PathBuf,
     tx: Inbox,
-    /// Shared with the entry's handler, which must not read the model.
+    /// Shared with the input's handlers, which must not read the model.
     focus: Rc<Cell<Option<BufferId>>>,
 }
 
@@ -45,18 +45,12 @@ impl View {
         let sidebar = Sidebar::build(&tx);
         let members = MemberList::build();
         let stack = gtk::Stack::builder().hexpand(true).vexpand(true).build();
-        let entry = gtk::Entry::builder()
-            .margin_start(6)
-            .margin_end(6)
-            .margin_top(6)
-            .margin_bottom(6)
-            .sensitive(false)
-            .build();
-        entry.add_css_class(classes::INPUT);
+        let focus = Rc::new(Cell::new(None::<BufferId>));
+        let input = InputBar::build(tx.clone(), focus.clone());
 
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat.append(&stack);
-        chat.append(&entry);
+        chat.append(input.widget());
         let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         content.append(&chat);
         content.append(members.widget());
@@ -101,20 +95,7 @@ impl View {
             }
         });
 
-        let focus = Rc::new(Cell::new(None::<BufferId>));
-        entry.connect_activate({
-            let tx = tx.clone();
-            let focus = focus.clone();
-            move |entry| {
-                let text = entry.text().to_string();
-                let Some(buffer) = focus.get() else { return };
-                if text.is_empty() {
-                    return;
-                }
-                entry.set_text("");
-                let _ = tx.send(Input::Say { buffer, text }.into());
-            }
-        });
+        input.install_window_keys(&window);
 
         window.present();
         View {
@@ -124,7 +105,7 @@ impl View {
             members,
             stack,
             chats: HashMap::new(),
-            entry,
+            input,
             style,
             pages: pages.to_owned(),
             tx,
@@ -132,7 +113,7 @@ impl View {
         }
     }
 
-    pub fn apply(&mut self, ws: &Workspace, changes: &[Change]) {
+    pub fn apply(&mut self, ws: &Workspace, changes: &[Change], ui: &[UiEffect]) {
         // A buffer rebuilt from the final workspace in this pass (its member
         // list reset) must not also take this pass's diffs for it.
         let mut rebuilt = HashSet::new();
@@ -206,6 +187,11 @@ impl View {
                 );
             }
         }
+        // After the changes, so a SetInput for a new focus lands in the
+        // field the user now sees.
+        for effect in ui {
+            self.input.apply(effect, &self.window);
+        }
         self.refresh_chrome(ws);
     }
 
@@ -246,13 +232,6 @@ impl View {
         if self.title.subtitle() != subtitle {
             self.title.set_subtitle(&subtitle);
         }
-        let online = ws
-            .focus()
-            .and_then(|id| ws.buffer(id))
-            .is_some_and(|(net, _)| matches!(net.link(), Link::Online { .. }));
-        if self.entry.is_sensitive() != online {
-            self.entry.set_sensitive(online);
-        }
     }
 
     pub fn focused_chat(&self) -> Option<&ChatView> {
@@ -267,8 +246,8 @@ impl View {
         &self.title
     }
 
-    pub fn entry(&self) -> &gtk::Entry {
-        &self.entry
+    pub fn input(&self) -> &InputBar {
+        &self.input
     }
 
     pub fn sidebar(&self) -> &Sidebar {

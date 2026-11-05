@@ -1,5 +1,6 @@
 pub mod chat_view;
 pub mod classes;
+pub mod input;
 pub mod member_list;
 pub mod probe;
 pub mod rows;

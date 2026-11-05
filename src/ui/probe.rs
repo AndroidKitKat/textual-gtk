@@ -2,7 +2,10 @@
 //! the app writes what the window shows to `<prefix>.json` and a snapshot
 //! to `<prefix>.png`. Files the test creates drive it: `<prefix>.reload`
 //! reloads the focused chat view, `<prefix>.close` closes the window, and
-//! `<prefix>.actions` (one JSON object per line) is fed in as clicks.
+//! `<prefix>.actions` (one JSON object per line) is fed in as clicks and
+//! typing. Typing goes through the input's own handlers (`InputBar::set`
+//! and `press`), the code its key controllers call, because GTK 4 cannot
+//! synthesize key events and xdotool under Xvfb races the focus.
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +16,7 @@ use textual_core::model::network::ServerId;
 use textual_core::model::workspace::{Input, UiAction, Workspace};
 
 use crate::app::{Inbox, Request};
+use crate::ui::input::Key;
 use crate::ui::view::View;
 
 /// The page state the phase-1 check already reads from the focused view.
@@ -43,8 +47,13 @@ pub enum Action {
     Expand(String),
     Collapse(String),
     Close(String),
-    Say(String, String),
     WindowActive(bool),
+    /// Puts text in the input, the caret at a character offset (the end
+    /// if past it).
+    Input(String, usize),
+    Key(Key),
+    /// Answers the flood question: send or not.
+    AnswerFlood(bool),
 }
 
 pub fn install(prefix: PathBuf, tx: Inbox) {
@@ -89,24 +98,41 @@ fn parse_action(line: &str) -> Result<Action, String> {
         "expand" => Action::Expand(text()?),
         "collapse" => Action::Collapse(text()?),
         "close" => Action::Close(text()?),
-        "say" => {
-            let pair = arg.as_array().ok_or("expected [id, text]")?;
+        "input" => {
+            let pair = arg.as_array().ok_or("expected [text, caret]")?;
             match (
                 pair.first().and_then(Value::as_str),
-                pair.get(1).and_then(Value::as_str),
+                pair.get(1).and_then(Value::as_u64),
             ) {
-                (Some(id), Some(text)) => Action::Say(id.to_owned(), text.to_owned()),
-                _ => return Err("expected [id, text]".into()),
+                (Some(text), Some(caret)) => Action::Input(text.to_owned(), caret as usize),
+                _ => return Err("expected [text, caret]".into()),
             }
         }
+        "key" => Action::Key(Key::parse(&text()?).ok_or("unknown key")?),
+        "answer_flood" => Action::AnswerFlood(arg.as_bool().ok_or("expected a bool")?),
         "window_active" => Action::WindowActive(arg.as_bool().ok_or("expected a bool")?),
         other => return Err(format!("unknown action {other}")),
     })
 }
 
-/// Turns an action into the input a click would send, or says which id it
-/// could not find.
-pub fn input_for(ws: &Workspace, action: &Action) -> Result<Input, String> {
+/// Carries out an action: typing on the view, which reaches the model as
+/// the input's own `UiAction`s; a click as the input it would send.
+pub fn act(ws: &Workspace, view: &View, action: &Action) -> Result<Option<Input>, String> {
+    let input = view.input();
+    match action {
+        Action::Input(text, caret) => input.set(text, *caret),
+        Action::Key(key) => {
+            input.press(*key);
+        }
+        Action::AnswerFlood(send) => input.answer_flood(*send),
+        _ => return input_for(ws, action).map(Some),
+    }
+    Ok(None)
+}
+
+/// Turns a click into the input it would send, or says which id it could
+/// not find.
+fn input_for(ws: &Workspace, action: &Action) -> Result<Input, String> {
     let buffer = |id: &str| buffer_by_path(ws, id).ok_or_else(|| format!("no buffer {id}"));
     let server = |id: &str| server_by_name(ws, id).ok_or_else(|| format!("no network {id}"));
     Ok(match action {
@@ -120,11 +146,10 @@ pub fn input_for(ws: &Workspace, action: &Action) -> Result<Input, String> {
             server: server(id)?,
             expanded: false,
         }),
-        Action::Say(id, text) => Input::Say {
-            buffer: buffer(id)?,
-            text: text.clone(),
-        },
         Action::WindowActive(active) => Input::Ui(UiAction::WindowActive(*active)),
+        Action::Input(..) | Action::Key(_) | Action::AnswerFlood(_) => {
+            return Err("not a click".into());
+        }
     })
 }
 
@@ -181,7 +206,9 @@ pub fn write(prefix: &Path, ws: &Workspace, view: &View) {
         "window_classes": view.window().css_classes().iter().map(|c| c.to_string()).collect::<Vec<_>>(),
         "title": view.title_widget().title().to_string(),
         "subtitle": view.title_widget().subtitle().to_string(),
-        "input_sensitive": view.entry().is_sensitive(),
+        "input_sensitive": view.input().widget().is_sensitive(),
+        "input": {"text": view.input().text(), "caret": view.input().caret()},
+        "flood_question": view.input().flood_question(),
         "rows": rows,
         "members": members,
         "members_visible": view.members().widget().is_visible(),
@@ -274,13 +301,6 @@ mod tests {
             ),
             (r#"{"close":"Local/#a"}"#, Input::Ui(UiAction::Close(a))),
             (
-                r#"{"say":["Local/#a","hi"]}"#,
-                Input::Say {
-                    buffer: a,
-                    text: "hi".into(),
-                },
-            ),
-            (
                 r#"{"window_active":false}"#,
                 Input::Ui(UiAction::WindowActive(false)),
             ),
@@ -293,6 +313,19 @@ mod tests {
         assert!(input_for(&h.ws, &Action::Select("Local/#zz".into())).is_err());
         assert!(input_for(&h.ws, &Action::Expand("Nope".into())).is_err());
         assert!(parse_action(r#"{"dance":"Local"}"#).is_err());
+        assert_eq!(
+            parse_action(r#"{"input":["hi al",5]}"#),
+            Ok(Action::Input("hi al".into(), 5))
+        );
+        assert_eq!(
+            parse_action(r#"{"key":"ShiftTab"}"#),
+            Ok(Action::Key(Key::ShiftTab))
+        );
+        assert!(parse_action(r#"{"key":"F13"}"#).is_err());
+        assert_eq!(
+            parse_action(r#"{"answer_flood":true}"#),
+            Ok(Action::AnswerFlood(true))
+        );
         assert_eq!(path_of(&h.ws, a).as_deref(), Some("Local/#a"));
         assert_eq!(path_of(&h.ws, console).as_deref(), Some("Local"));
     }

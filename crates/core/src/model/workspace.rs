@@ -3,12 +3,16 @@
 //! app feeds it `Input`s and carries out the `Effect`s; the view reads it
 //! and patches widgets from the `Change`s.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use crate::input::completion::Completion;
+use crate::input::history::History;
 use crate::model::buffer::{Buffer, BufferId};
 use crate::model::network::{self, Effect, Network, ServerConfig, ServerId};
 use crate::model::{Change, Cx, Ids, Now, Preferences};
+
+mod submit;
 
 #[derive(Debug)]
 pub enum Input {
@@ -16,30 +20,79 @@ pub enum Input {
         server: ServerId,
         input: network::Input,
     },
-    /// Text typed into a buffer, sent as one PRIVMSG.
-    Say {
-        buffer: BufferId,
-        text: String,
-    },
     Ui(UiAction),
     /// The time from `next_wake` has come.
     Wake,
 }
 
-/// What the user did in the window. Each is idempotent, so the echo of a
-/// selection the model made itself costs nothing.
+/// What the user did in the window. Selection, expansion, window state,
+/// close and draft are idempotent, so the echo of a change the model made
+/// itself costs nothing; the input keys are not echoes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiAction {
     Select(BufferId),
-    SetExpanded { server: ServerId, expanded: bool },
+    SetExpanded {
+        server: ServerId,
+        expanded: bool,
+    },
     WindowActive(bool),
     Close(BufferId),
+    /// Return in the input of `buffer`. The view has already emptied the
+    /// field, as Textual does before anything is sent. `confirmed` is the
+    /// answer to `UiEffect::ConfirmFlood`.
+    Submit {
+        buffer: BufferId,
+        text: String,
+        confirmed: bool,
+    },
+    /// The input's text changed.
+    Draft(String),
+    /// Up (`older`) or Down in history, with the field's text.
+    History {
+        text: String,
+        older: bool,
+    },
+    /// Tab or Shift+Tab (`backward`). `selection` is in characters.
+    Complete {
+        text: String,
+        selection: (usize, usize),
+        backward: bool,
+    },
+}
+
+/// Something only the view can do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiEffect {
+    /// Put `text` in the input with the caret at `caret` (in characters),
+    /// unless the user changed the field from `was` meanwhile.
+    SetInput {
+        was: String,
+        text: String,
+        caret: usize,
+    },
+    /// Textual's "possible flood" question for text typed into `buffer`; a
+    /// yes sends it again as `Submit { confirmed: true }`.
+    ConfirmFlood { buffer: BufferId, text: String },
 }
 
 #[derive(Debug, Default)]
 pub struct Out {
     pub effects: Vec<(ServerId, Effect)>,
     pub changes: Vec<Change>,
+    pub ui: Vec<UiEffect>,
+}
+
+/// The input field's memory: Textual's `TLOInputHistory` and its
+/// `TLONicknameCompletionStatus`.
+#[derive(Debug, Default)]
+struct InputMemory {
+    /// What the field holds, as the view last reported it.
+    field: String,
+    global: History,
+    /// With `input_history_per_buffer`: each buffer's history and unsent
+    /// text (`lastHistoryItem`).
+    buffers: HashMap<BufferId, (History, String)>,
+    completion: Completion,
 }
 
 #[derive(Debug)]
@@ -51,6 +104,7 @@ pub struct Workspace {
     collapsed: HashSet<ServerId>,
     ids: Ids,
     prefs: Preferences,
+    input: InputMemory,
 }
 
 impl Default for Workspace {
@@ -72,6 +126,7 @@ impl Workspace {
             collapsed: HashSet::new(),
             ids: Ids::default(),
             prefs,
+            input: InputMemory::default(),
         }
     }
 
@@ -124,11 +179,6 @@ impl Workspace {
             Input::Network { server, input } => {
                 self.on_network(server, now, out, |net, cx, o| net.update(input, cx, o));
             }
-            Input::Say { buffer, text } => {
-                if let Some(server) = self.server_of(buffer) {
-                    self.on_network(server, now, out, |net, cx, o| net.say(buffer, &text, cx, o));
-                }
-            }
             Input::Wake => {
                 let servers: Vec<ServerId> = self.networks.iter().map(Network::id).collect();
                 for server in servers {
@@ -146,23 +196,21 @@ impl Workspace {
     }
 
     /// Runs one step of one network, then counts the lines it printed.
-    fn on_network(
+    fn on_network<R>(
         &mut self,
         server: ServerId,
         now: Now,
         out: &mut Out,
-        step: impl FnOnce(&mut Network, &mut Cx, &mut network::Out),
-    ) {
-        let Some(net) = self.networks.iter_mut().find(|n| n.id() == server) else {
-            return;
-        };
+        step: impl FnOnce(&mut Network, &mut Cx, &mut network::Out) -> R,
+    ) -> Option<R> {
+        let net = self.networks.iter_mut().find(|n| n.id() == server)?;
         let mut cx = Cx {
             now,
             ids: &mut self.ids,
-            prefs: self.prefs,
+            prefs: &self.prefs,
         };
         let mut net_out = network::Out::default();
-        step(net, &mut cx, &mut net_out);
+        let result = step(net, &mut cx, &mut net_out);
         out.effects
             .extend(net_out.effects.into_iter().map(|e| (server, e)));
         let seen = self.focus.filter(|_| self.window_active);
@@ -180,6 +228,7 @@ impl Workspace {
                 out.changes.push(Change::Counters(buffer));
             }
         }
+        Some(result)
     }
 
     fn on_ui(&mut self, action: UiAction, now: Now, out: &mut Out) {
@@ -192,22 +241,63 @@ impl Workspace {
                     self.mark_read(id, out);
                 }
             }
-            UiAction::Close(id) => {
-                let (Some(server), Some(previous)) = (self.server_of(id), self.previous_buffer(id))
-                else {
-                    return;
-                };
-                self.on_network(server, now, out, |net, _, o| net.close(id, o));
-                // The row above always exists: the console is never closed.
-                if self.focus == Some(id) && self.buffer(id).is_none() {
-                    self.focus = Some(previous);
-                    out.changes.push(Change::Focus(previous));
-                    if self.window_active {
-                        self.mark_read(previous, out);
-                    }
-                }
-            }
+            UiAction::Close(id) => self.close(id, now, out),
+            UiAction::Submit {
+                buffer,
+                text,
+                confirmed,
+            } => self.submit(buffer, &text, confirmed, now, out),
+            UiAction::Draft(text) => self.input.field = text,
+            UiAction::History { text, older } => self.recall(text, older, out),
+            UiAction::Complete {
+                text,
+                selection,
+                backward,
+            } => self.complete(text, selection.0..selection.1, backward, now, out),
         }
+    }
+
+    /// Closes a channel or query; the focus falls back to the row above.
+    fn close(&mut self, id: BufferId, now: Now, out: &mut Out) {
+        let (Some(server), Some(previous)) = (self.server_of(id), self.previous_buffer(id)) else {
+            return;
+        };
+        self.on_network(server, now, out, |net, _, o| net.close(id, o));
+        if self.buffer(id).is_some() {
+            return;
+        }
+        // Textual's `TLOInputHistory destroy:`.
+        self.input.buffers.remove(&id);
+        // The row above always exists: the console is never closed.
+        if self.focus == Some(id) {
+            self.focus = None;
+            self.set_focus(previous, out);
+        }
+    }
+
+    /// Up or Down: Textual's `moveInputHistory:`. Down leaves the caret at
+    /// the start, Up at the end.
+    fn recall(&mut self, text: String, older: bool, out: &mut Out) {
+        let history = match self.focus {
+            Some(id) if self.prefs.input_history_per_buffer => {
+                &mut self.input.buffers.entry(id).or_default().0
+            }
+            _ => &mut self.input.global,
+        };
+        let recalled = if older {
+            history.up(&text)
+        } else {
+            history.down(&text)
+        };
+        if let Some(new) = recalled {
+            let caret = if older { new.chars().count() } else { 0 };
+            self.set_input(text, new, caret, out);
+        }
+    }
+
+    fn set_input(&mut self, was: String, text: String, caret: usize, out: &mut Out) {
+        self.input.field.clone_from(&text);
+        out.ui.push(UiEffect::SetInput { was, text, caret });
     }
 
     /// The buffer above `id` in its network, which a close falls back to.
@@ -231,6 +321,34 @@ impl Workspace {
         let console = self.buffer(id).is_some_and(|(_, b)| b.is_console());
         if !console && self.collapsed.remove(&server) {
             out.changes.push(Change::Expanded(server));
+        }
+        self.set_focus(id, out);
+    }
+
+    /// Moves the focus. With per-buffer history the field's text stays
+    /// with the buffer it was typed in (`TLOInputHistory moveFocusTo:`).
+    fn set_focus(&mut self, id: BufferId, out: &mut Out) {
+        if self.focus == Some(id) {
+            return;
+        }
+        if self.prefs.input_history_per_buffer {
+            let field = std::mem::take(&mut self.input.field);
+            if let Some(old) = self.focus {
+                self.input
+                    .buffers
+                    .entry(old)
+                    .or_default()
+                    .1
+                    .clone_from(&field);
+            }
+            let draft = self
+                .input
+                .buffers
+                .get(&id)
+                .map(|(_, d)| d.clone())
+                .unwrap_or_default();
+            let caret = draft.chars().count();
+            self.set_input(field, draft, caret, out);
         }
         self.focus = Some(id);
         out.changes.push(Change::Focus(id));
@@ -259,11 +377,7 @@ impl Workspace {
             && focus != console
             && self.server_of(focus) == Some(server)
         {
-            self.focus = Some(console);
-            out.changes.push(Change::Focus(console));
-            if self.window_active {
-                self.mark_read(console, out);
-            }
+            self.set_focus(console, out);
         }
     }
 

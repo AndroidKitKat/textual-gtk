@@ -445,7 +445,7 @@ fn is_numeric(command: &str) -> bool {
 /// matchKeywordsUsingNormalMatching`): an end of the match that is a
 /// letter or digit must not touch another letter or digit, and a match
 /// inside a link does not count. Case is folded by the server's casemap.
-fn mentions(text: &str, nick: &str, casemap: CaseMapping) -> bool {
+pub(crate) fn mentions(text: &str, nick: &str, casemap: CaseMapping) -> bool {
     if nick.is_empty() {
         return false;
     }

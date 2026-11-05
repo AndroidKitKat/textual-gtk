@@ -34,6 +34,8 @@ pub struct Session {
     account: Option<String>,
     caps: Caps,
     isupport: Isupport,
+    /// Set by 306 and cleared by 305, which `/away` toggles on.
+    away: bool,
 }
 
 impl Session {
@@ -44,6 +46,7 @@ impl Session {
             account: registered.account,
             caps: registered.caps,
             isupport: Isupport::default(),
+            away: false,
         }
     }
 
@@ -65,6 +68,10 @@ impl Session {
 
     pub fn isupport(&self) -> &Isupport {
         &self.isupport
+    }
+
+    pub fn is_away(&self) -> bool {
+        self.away
     }
 
     pub fn casemap(&self) -> CaseMapping {
@@ -144,6 +151,10 @@ impl Handler<'_, '_> {
                 self.who_reply(msg, param(2), param(6), param(3), param(4), Some(param(7)))
             }
             "315" => self.end_of_who(msg),
+            "305" | "306" => {
+                self.s.away = msg.command == "306";
+                self.print(msg);
+            }
             "AWAY" => {
                 let away = msg.param(0).is_some_and(|r| !r.is_empty());
                 self.update_everywhere(msg, |m| m.away = away);
@@ -210,11 +221,15 @@ impl Handler<'_, '_> {
         let casemap = self.s.casemap();
         let targets: Vec<BufferId> = match destination {
             // A public message for a channel we are not in is dropped.
-            Destination::Channel(name) => self
-                .buffers
-                .find_joined(casemap, &name)
-                .into_iter()
-                .collect(),
+            Destination::Channel(name) => {
+                let id = self.buffers.find_joined(casemap, &name);
+                if let Some(id) = id {
+                    let now = self.cx.now.mono;
+                    self.buffers
+                        .converse(id, &line, &self.s.nick, casemap, true, now);
+                }
+                id.into_iter().collect()
+            }
             // A message from or to an empty nick has no query to go in.
             Destination::Query(nick) if nick.is_empty() => Vec::new(),
             Destination::Query(nick) => vec![self.query(&nick, line.kind != LineType::Notice)],

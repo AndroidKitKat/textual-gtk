@@ -1,0 +1,41 @@
+# Up and Down walk one history for every buffer (Textual's default). Up on
+# unsent text keeps it, so Down comes back to it; a sent line repeated
+# right away is kept once. The field keeps its text across a focus change.
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+< :textual!u@h JOIN #d
+> MODE #d
+! focus #c
+! field first|
+! return
+> PRIVMSG #c first
+! field second|
+! return
+> PRIVMSG #c second
+! field second|
+! return
+> PRIVMSG #c second
+! field draft|
+! up
+? ui input second|
+? field second|
+! up
+? field first|
+! up
+? field first|
+! down
+? field |second
+! down
+? field |draft
+! down
+? field |
+! down
+? field |
+! focus #d
+! up
+? field draft|
+! field typed in d|
+! focus #c
+? field typed in d|
+? registered textual

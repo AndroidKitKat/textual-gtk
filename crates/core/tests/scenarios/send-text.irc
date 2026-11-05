@@ -1,0 +1,34 @@
+# Text typed into a channel or query goes out as PRIVMSG and, without
+# echo-message, is printed at once (Textual's `sendText:`). `//x` sends
+# `/x` and a lone `/` is text. Textual sends to a parted channel too and
+# lets the server answer. Offline the line is still printed, and the
+# console says it was not sent. In the console every line is a command.
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+! type #c hi all
+> PRIVMSG #c :hi all
+? line #c <textual> hi all
+? unread #c 0 highlights 0
+! type #c //notacommand
+> PRIVMSG #c /notacommand
+? line #c <textual> /notacommand
+! type #c /
+> PRIVMSG #c /
+? line #c <textual> /
+! type console hello there
+> HELLO there
+< :textual!u@h PART #c
+! type #c anyone?
+> PRIVMSG #c anyone?
+? line #c <textual> anyone?
+! disconnect
+> QUIT
+< ERROR :Closing Link
+> hangup #1
+? notice Disconnected: quit
+< :bob!b@h PRIVMSG textual :late
+! type #c x
+? line #c <textual> x
+? notice Failed to send data to server. Not connected.
+? offline user-quit

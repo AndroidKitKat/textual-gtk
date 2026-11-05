@@ -435,6 +435,46 @@ impl Buffers {
     /// The end of the print funnel: keeps the line unless this buffer
     /// already has its `msgid` (a server delivering a message to our own
     /// nick sends it twice).
+    /// Textual's conversation tracking for a spoken line in a joined
+    /// channel. A line `received` from the server first weighs its sender
+    /// (`IRCClient.m:6510-6521`: toward us when the text holds our nick
+    /// without its underscores); then every member the line names is
+    /// weighed, toward us when the line is ours (`TVCLogController.m:1289`).
+    pub(crate) fn converse(
+        &mut self,
+        id: BufferId,
+        line: &Line,
+        me: &str,
+        casemap: CaseMapping,
+        received: bool,
+        now: Instant,
+    ) {
+        if !matches!(line.kind, LineType::Privmsg | LineType::Action) {
+            return;
+        }
+        let Some(joined) = self.joined_mut(id) else {
+            return;
+        };
+        if received && let Some(sender) = &line.nickname {
+            let toward_us = line.body.contains(me.trim_matches('_'));
+            joined
+                .members
+                .converse(&casemap.nick(sender), toward_us, now);
+        }
+        let body = crate::style::body::strip(&line.body);
+        let named: Vec<String> = joined
+            .members
+            .iter()
+            .filter(|m| crate::line::mentions(&body, &m.nick, casemap))
+            .map(|m| m.nick.clone())
+            .collect();
+        for nick in named {
+            joined
+                .members
+                .converse(&casemap.nick(&nick), line.from_self, now);
+        }
+    }
+
     pub(crate) fn print(&mut self, id: BufferId, line: Line, changes: &mut Vec<Change>) {
         let Some(buffer) = self.get_mut(id) else {
             return;

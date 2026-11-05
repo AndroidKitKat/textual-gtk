@@ -1,0 +1,56 @@
+# Tab completion in a channel: members by rank, then by conversation
+# weight once they talk; commands at the start; channels after #; the
+# services and the network name last.
+! welcome
+< :irc.test 005 textual CHANTYPES=# PREFIX=(ov)@+ NETWORK=TestNet :are supported by this server
+< :textual!u@h JOIN #c
+> MODE #c
+< :irc.test 353 textual = #c :textual @alice albert +alfred bob
+< :irc.test 366 textual #c :End of NAMES list
+> WHO #c
+< :irc.test 315 textual #c :End of WHO list
+! focus #c
+! field al|
+! tab
+? ui input alice |
+! tab
+? field alfred |
+! tab
+? field albert |
+! tab
+? field alice |
+! shift-tab
+? field albert |
+< :albert!a@h PRIVMSG #c :hello
+! field al|
+! tab
+? field albert |
+< :alfred!a@h PRIVMSG #c :textual: ping
+! field al|
+! tab
+? field alfred |
+! field hi |
+! tab
+? field hi alfred |
+! tab
+? field hi albert |
+! field /jo|
+! tab
+? field /join |
+! field #|
+! tab
+? field #c |
+! field Nick|
+! tab
+? field NickServ |
+! field test|
+! tab
+? field TestNet |
+! field zzz|
+! tab
+? field zzz|
+! focus console
+! field al|
+! tab
+? field al|
+? registered textual

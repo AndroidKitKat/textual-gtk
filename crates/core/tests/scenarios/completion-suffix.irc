@@ -1,0 +1,20 @@
+# A completion suffix follows a nick at the start of the line only, and a
+# second Tab replaces it rather than adding another.
+= completion-suffix :\x20
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+< :irc.test 353 textual = #c :textual anna anton
+< :irc.test 366 textual #c :End of NAMES list
+> WHO #c
+< :irc.test 315 textual #c :End of WHO list
+! focus #c
+! field an|
+! tab
+? field anna: |
+! tab
+? field anton: |
+! field ask an|
+! tab
+? field ask anna |
+? registered textual
