@@ -1,0 +1,23 @@
+# Events from an earlier connection are dropped, whatever they are.
+! connect
+> dial #1 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! closed error Connection refused
+? notice Disconnected: Connection refused; reconnecting in 5 s
+@ wake
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! #1 opened
+! #1 line :irc.test 001 textual :Welcome
+! #1 closed eof
+? connecting
+? failures 1
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+! #1 closed eof
+! #1 line ERROR :Closing Link
+! #3 closed eof
+< :irc.test 001 textual :Welcome
+? registered textual

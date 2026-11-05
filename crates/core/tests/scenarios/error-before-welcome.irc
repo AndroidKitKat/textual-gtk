@@ -1,6 +1,9 @@
-# ERROR before 001 ends registration with the server's reason.
+# ERROR before 001 ends registration with the server's reason, and the
+# link is retried.
 > CAP LS 302
 > NICK textual
 > USER textual 0 * Textual
 < ERROR :Closing Link: 127.0.0.1 (Registration timed out)
+> hangup #1
+? notice Disconnected: ERROR Closing Link: 127.0.0.1 (Registration timed out); reconnecting in 5 s
 ? failed error Closing Link: 127.0.0.1 (Registration timed out)

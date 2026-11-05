@@ -1,0 +1,10 @@
+# With auto_reconnect off, a lost link stays down.
+= auto-reconnect off
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+! closed eof
+? notice Disconnected: the server closed the connection
+? next-wake none
+? offline closed

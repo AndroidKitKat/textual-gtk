@@ -1,0 +1,18 @@
+# A server that never sends 001 is hung up on 240 s after the socket
+# opened. Lines arriving meanwhile do not extend the deadline.
+! connect
+> dial #1 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+@ +10s
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+@ +100s
+< :irc.test NOTICE * :*** Looking up your hostname...
+@ +139.999s
+? registering
+@ +1ms
+> hangup #1
+? notice Disconnected: registration timed out; reconnecting in 5 s
+? waiting 4.965s

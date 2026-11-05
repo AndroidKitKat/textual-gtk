@@ -1,0 +1,23 @@
+# An untrusted certificate and a ban end the link for good. An explicit
+# connect afterwards still dials, with the failure count reset.
+= tls on
+! connect
+> dial #1 irc.test:6667 tls
+? notice Connecting to irc.test:6667
+! closed bad-certificate 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+? notice Disconnected: the server's certificate is not trusted
+? offline bad-certificate
+? next-wake none
+? desired online
+! connect
+> dial #2 irc.test:6667 tls
+? notice Connecting to irc.test:6667
+? failures 0
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 465 textual :You are banned from this server (K-lined)
+> hangup #2
+? notice Disconnected: banned: You are banned from this server (K-lined)
+? offline banned

@@ -23,4 +23,6 @@
 > NICK taken____
 ? notice The nick taken___ is temporarily unavailable; trying taken____
 < :ergo.test 433 * taken____ :Nickname is already in use
+> hangup #1
+? notice Disconnected: every nick was refused (taken, taken_, taken__, taken___, taken____); reconnecting in 5 s
 ? failed no-usable-nick

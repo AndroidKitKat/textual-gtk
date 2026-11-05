@@ -1,0 +1,70 @@
+# A server that accepts us and drops us after 10 s keeps escalating:
+# failures reset only after a link has stayed online for 60 s.
+! connect
+> dial #1 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+@ +10s
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 5 s
+? failures 1
+? waiting 4.965s
+@ wake
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+@ +10s
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 10 s
+? failures 2
+? waiting 9.947s
+@ wake
+> dial #3 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+@ +10s
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 20 s
+? failures 3
+? waiting 19.890s
+@ wake
+> dial #4 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+@ +10s
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 38 s
+? failures 4
+? waiting 37.382s
+@ wake
+> dial #5 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+# This one stays up.
+@ +59.999s
+? failures 4
+@ +1ms
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 5 s
+? failures 1
+? waiting 4.965s

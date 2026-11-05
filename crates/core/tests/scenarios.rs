@@ -11,7 +11,7 @@ fn every_scenario_transcript_passes() {
         .filter(|p| p.extension().is_some_and(|e| e == "irc"))
         .collect();
     paths.sort();
-    assert!(paths.len() >= 15, "scenarios went missing: {paths:?}");
+    assert!(paths.len() >= 29, "scenarios went missing: {paths:?}");
 
     let mut failures = String::new();
     for path in &paths {
@@ -38,14 +38,25 @@ fn the_runner_reports_a_wrong_sent_line() {
 }
 
 #[test]
-fn the_runner_reports_an_unchecked_notice_and_rejects_time() {
-    let unchecked = "= auth sasl-plain\n< :s CAP * LS :x\n";
+fn the_runner_reports_an_unchecked_notice_and_bad_time() {
+    let unchecked = "= auth sasl-plain\n> CAP LS 302\n> NICK textual\n> USER textual 0 * Textual\n< :s CAP * LS :x\n> CAP END\n? registering\n";
     let errors = support::run_transcript(unchecked).unwrap_err();
     assert!(
         errors.contains("unchecked notice \"SASL failed: the server does not offer SASL"),
         "{errors}"
     );
-    assert!(support::run_transcript("> CAP LS 302\n@ +5s\n").is_err());
+    let errors = support::run_transcript("! connect\n@ 5s\n").unwrap_err();
+    assert!(errors.contains("2: bad time \"5s\""), "{errors}");
+}
+
+#[test]
+fn the_runner_reports_a_wrong_wait_with_the_real_one() {
+    let script = "! connect\n> dial #1 irc.test:6667 plain\n? notice Connecting to irc.test:6667\n! closed eof\n? notice Disconnected: the server closed the connection; reconnecting in 5 s\n? waiting 5s\n";
+    let errors = support::run_transcript(script).unwrap_err();
+    assert!(
+        errors.contains("6: expected \"waiting 5s\", got waiting 4.965s"),
+        "{errors}"
+    );
 }
 
 #[test]

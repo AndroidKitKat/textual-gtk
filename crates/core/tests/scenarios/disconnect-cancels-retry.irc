@@ -1,0 +1,12 @@
+# Wanting the network offline while a retry is pending cancels the retry.
+! connect
+> dial #1 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! closed error Connection refused
+? notice Disconnected: Connection refused; reconnecting in 5 s
+? next-wake 4.965s
+! disconnect
+? desired offline
+? next-wake none
+@ +600s
+? offline user-quit

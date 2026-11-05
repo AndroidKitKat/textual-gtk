@@ -1,0 +1,30 @@
+# Any line from the server counts as liveness. After 270 s of silence we
+# PING; the answer, like any line, resets the clock. 360 s of silence closes
+# the link. The server's own PING is answered by the transport, so we send
+# nothing for it, but it still counts.
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+? registered textual
+@ +200s
+< :friend!u@h PRIVMSG textual :hi
+? next-wake 270s
+@ +100s
+< PING :irc.test
+? next-wake 270s
+@ +269.999s
+? next-wake 1ms
+@ +1ms
+> PING textual-gtk
+? next-wake 90s
+< :irc.test PONG irc.test :textual-gtk
+? next-wake 270s
+@ +270s
+> PING textual-gtk
+@ +89.999s
+? registered textual
+@ +1ms
+> hangup #1
+? notice Disconnected: no reply from the server; reconnecting in 5 s
+? waiting 4.965s

@@ -1,0 +1,38 @@
+# Connect, register and go online. After 001, 005 sets the casemap and the
+# network name, a line from ourselves gives our hostmask, NICK of ourselves
+# renames us, and CAP NEW still requests what we want.
+= caps multi-prefix away-notify
+! connect
+> dial #1 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+? connecting
+? next-wake none
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+? next-wake 240s
+< :irc.test CAP * LS :multi-prefix
+> CAP REQ multi-prefix
+< :irc.test CAP * ACK multi-prefix
+> CAP END
+< :irc.test 001 textual :Welcome
+? registered textual
+? next-wake 270s
+< :irc.test 005 textual CASEMAPPING=ascii NETWORK=TestNet :are supported by this server
+? casemap ascii
+? network TestNet
+< :textual!~u@host.test JOIN #a
+? hostmask ~u@host.test
+# Under ascii, TEXTUAL is us.
+< :TEXTUAL!~u@host.test NICK :renamed
+? nick renamed
+< :Renamed!~u@other.test NICK newer
+? nick newer
+? hostmask ~u@other.test
+< :someone!x@y NICK :other
+? nick newer
+< :irc.test CAP newer NEW :away-notify
+> CAP REQ away-notify
+? failures 0
+? registered newer

@@ -1,0 +1,61 @@
+# A server that refuses every connection: the wait doubles from 5 s and
+# stops growing at 300 s: 5, 10, 20, 40, 80, 160, 300, 300. Each wait is
+# shortened by up to a tenth, derived from the server id and the failure
+# count, so the numbers are the same in every run. The console rounds the
+# wait up to whole seconds.
+! connect
+> dial #1 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! closed error Connection refused
+? notice Disconnected: Connection refused; reconnecting in 5 s
+? failures 1
+? waiting 4.965s
+@ wake
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! closed error Connection refused
+? notice Disconnected: Connection refused; reconnecting in 10 s
+? failures 2
+? waiting 9.947s
+@ wake
+> dial #3 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! closed error Connection refused
+? notice Disconnected: Connection refused; reconnecting in 20 s
+? failures 3
+? waiting 19.890s
+@ wake
+> dial #4 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! closed error Connection refused
+? notice Disconnected: Connection refused; reconnecting in 38 s
+? failures 4
+? waiting 37.382s
+@ wake
+> dial #5 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! closed error Connection refused
+? notice Disconnected: Connection refused; reconnecting in 77 s
+? failures 5
+? waiting 76.022s
+@ wake
+> dial #6 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! closed error Connection refused
+? notice Disconnected: Connection refused; reconnecting in 154 s
+? failures 6
+? waiting 153.513s
+@ wake
+> dial #7 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! closed error Connection refused
+? notice Disconnected: Connection refused; reconnecting in 290 s
+? failures 7
+? waiting 289.408s
+@ wake
+> dial #8 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! closed error Connection refused
+? notice Disconnected: Connection refused; reconnecting in 278 s
+? failures 8
+? waiting 277.772s

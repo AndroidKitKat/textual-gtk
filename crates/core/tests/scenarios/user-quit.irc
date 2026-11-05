@@ -1,0 +1,55 @@
+# A user quit sends QUIT, waits up to 5 s for the server to close, and never
+# reconnects. The server's ERROR reply, its close, or the grace period
+# expiring each ends the quit.
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+! disconnect Goodbye
+> QUIT Goodbye
+? quitting
+? desired offline
+? next-wake 5s
+< ERROR :Closing Link: textual (Quit: Goodbye)
+> hangup #1
+? notice Disconnected: quit
+? offline user-quit
+? next-wake none
+? failures 0
+! connect
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+! disconnect
+> QUIT
+! closed eof
+? notice Disconnected: quit
+? offline user-quit
+! connect
+> dial #3 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+! disconnect
+> QUIT
+@ +4.999s
+? quitting
+@ +1ms
+> hangup #3
+? notice Disconnected: quit
+# Quitting while still dialing just hangs up.
+! connect
+> dial #4 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! disconnect
+> hangup #4
+? notice Disconnected: quit
+@ +600s
+? offline user-quit

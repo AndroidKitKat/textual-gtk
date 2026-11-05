@@ -1,0 +1,17 @@
+# /reconnect: a quit while the network is still wanted online dials again
+# as soon as the quit is done, with no backoff.
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+! disconnect Reconnecting
+> QUIT Reconnecting
+! connect
+? quitting
+< ERROR :Closing Link: textual (Quit: Reconnecting)
+> hangup #1
+> dial #2 irc.test:6667 plain
+? notice Disconnected: quit
+? notice Connecting to irc.test:6667
+? failures 0
+? connecting

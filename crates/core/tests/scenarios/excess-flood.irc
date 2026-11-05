@@ -1,0 +1,36 @@
+# ERROR after 001 ends the link. Most are retried, but not Excess Flood or
+# Max SendQ exceeded: reconnecting would send what flooded again (Textual
+# cancels the reconnect for both).
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+< ERROR :Closing Link: textual[127.0.0.1] (Killed (oper (go away)))
+> hangup #1
+? notice Disconnected: ERROR Closing Link: textual[127.0.0.1] (Killed (oper (go away))); reconnecting in 5 s
+? waiting 4.965s
+@ wake
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+< ERROR :Closing Link: textual[127.0.0.1] (Excess Flood)
+> hangup #2
+? notice Disconnected: ERROR Closing Link: textual[127.0.0.1] (Excess Flood)
+? offline server-error
+? next-wake none
+! connect
+> dial #3 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+< ERROR :Closing Link: textual[127.0.0.1] (Max SendQ exceeded)
+> hangup #3
+? notice Disconnected: ERROR Closing Link: textual[127.0.0.1] (Max SendQ exceeded)
+? offline server-error

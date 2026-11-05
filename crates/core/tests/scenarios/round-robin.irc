@@ -1,0 +1,17 @@
+# Addresses are tried in turn, one per attempt, wrapping around.
+= addresses a.test:6697 b.test:7000
+= tls on
+! connect
+> dial #1 a.test:6697 tls
+? notice Connecting to a.test:6697
+! closed timeout
+? notice Disconnected: the connection timed out; reconnecting in 5 s
+@ wake
+> dial #2 b.test:7000 tls
+? notice Connecting to b.test:7000
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 10 s
+@ wake
+> dial #3 a.test:6697 tls
+? notice Connecting to a.test:6697
+? connecting
