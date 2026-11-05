@@ -176,6 +176,7 @@ pub fn write(prefix: &Path, ws: &Workspace, view: &View) {
         .collect();
     let state = json!({
         "focus": ws.focus().and_then(|id| path_of(ws, id)),
+        "window_classes": view.window().css_classes().iter().map(|c| c.to_string()).collect::<Vec<_>>(),
         "title": view.title_widget().title().to_string(),
         "subtitle": view.title_widget().subtitle().to_string(),
         "input_sensitive": view.entry().is_sensitive(),

@@ -169,12 +169,7 @@ fn factory() -> gtk::SignalListItemFactory {
                     .flags(sync)
                     .build(),
             );
-            bound.bind(
-                item,
-                row.bind_property("classes", &cell, "css-classes")
-                    .flags(sync)
-                    .build(),
-            );
+            bound.classes(item, row.upcast_ref(), cell.upcast_ref());
         }
     });
     factory.connect_unbind(move |_, item| {

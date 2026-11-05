@@ -46,13 +46,13 @@ impl View {
         let members = MemberList::build();
         let stack = gtk::Stack::builder().hexpand(true).vexpand(true).build();
         let entry = gtk::Entry::builder()
-            .css_classes([classes::INPUT])
             .margin_start(6)
             .margin_end(6)
             .margin_top(6)
             .margin_bottom(6)
             .sensitive(false)
             .build();
+        entry.add_css_class(classes::INPUT);
 
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat.append(&stack);
@@ -78,9 +78,9 @@ impl View {
             .title("Textual GTK")
             .default_width(1000)
             .default_height(640)
-            .css_classes([classes::WINDOW])
             .content(&toolbar)
             .build();
+        window.add_css_class(classes::WINDOW);
 
         window.connect_is_active_notify({
             let tx = tx.clone();

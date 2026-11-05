@@ -225,6 +225,37 @@ impl Bound {
         self.keep(item, move || binding.unbind());
     }
 
+    /// Keeps `widget`'s classes in step with `row`'s `classes` property,
+    /// next to the classes GTK gives the widget itself (a horizontal box's
+    /// `horizontal`), which binding `css-classes` would replace.
+    pub fn classes(&self, item: &gtk::ListItem, row: &glib::Object, widget: &gtk::Widget) {
+        let applied = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sync = {
+            let widget = widget.clone();
+            let applied = applied.clone();
+            move |row: &glib::Object| {
+                let want: Vec<String> = row.property("classes");
+                let mut applied = applied.borrow_mut();
+                for class in applied.iter().filter(|c| !want.contains(c)) {
+                    widget.remove_css_class(class);
+                }
+                for class in &want {
+                    widget.add_css_class(class);
+                }
+                *applied = want;
+            }
+        };
+        sync(row);
+        let handler = row.connect_notify_local(Some("classes"), move |row, _| sync(row));
+        let (row, widget) = (row.clone(), widget.clone());
+        self.keep(item, move || {
+            row.disconnect(handler);
+            for class in applied.borrow().iter() {
+                widget.remove_css_class(class);
+            }
+        });
+    }
+
     pub fn release(&self, item: &gtk::ListItem) {
         let undo = self.0.borrow_mut().remove(&(item.as_ptr() as usize));
         for f in undo.unwrap_or_default() {

@@ -31,6 +31,8 @@ import sys
 import time
 from pathlib import Path
 
+from PIL import Image
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # A private session bus with no activatable services: the desktop's
@@ -51,7 +53,16 @@ BUS_CONFIG = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Config
 """
 
 
+CHECKS = {}
+
+
+def report():
+    for name, ok in CHECKS.items():
+        print(f"{'ok  ' if ok else 'FAIL'} {name}")
+
+
 def fail(message):
+    report()
     print(f"FAIL: {message}")
     sys.exit(1)
 
@@ -149,6 +160,13 @@ class Probe:
         return self.wait_until(lambda s: predicate(s["view"]), what, timeout)["view"]
 
 
+def opaque_at(png, x, y):
+    with Image.open(png) as image:
+        image = image.convert("RGBA")
+        width, height = image.size
+        return image.getpixel((x if x >= 0 else width + x, y if y >= 0 else height + y))[3] == 255
+
+
 def row(view, row_id):
     return next((r for r in view["rows"] if r["id"] == row_id), None)
 
@@ -210,7 +228,7 @@ def main():
         start_new_session=True,
     )
     probe = Probe(prefix, app, log)
-    checks = {}
+    checks = CHECKS
     try:
         for nick, c in ((app_nick, channel), (app_nick, channel2), (app_nick_tls, channel3)):
             joined = talker.wait_for(
@@ -232,6 +250,11 @@ def main():
         checks["the app starts on the first console"] = view["focus"] == "Local" and row(view, "Local")["selected"]
         network = view["subtitle"].split(" on ")[-1]
         checks["the console title names the network and nick"] = view["subtitle"] == f"{app_nick} on {network}" and view["title"] == network
+        checks["the window keeps libadwaita's background class next to tx-window"] = {"background", "tx-window"} <= set(view["window_classes"])
+        time.sleep(1.5)
+        snapshot = prefix.with_suffix(".png")
+        checks["the header bar is painted opaque"] = opaque_at(snapshot, -40, 8)
+        checks["the input strip is painted opaque"] = opaque_at(snapshot, -40, -2)
 
         probe.act({"select": f"Local/{channel}"})
         # The app asks for the channel's modes on join; the 324 reply is
@@ -333,7 +356,6 @@ def main():
         cleared = probe.wait_page(lambda p: p["topic"] == "(No Topic)", "the topic bar to clear", 10)
         checks["an empty topic shows (No Topic)"] = cleared["topic"] == "(No Topic)"
 
-        snapshot = prefix.with_suffix(".png")
         checks["snapshot written"] = snapshot.exists() and snapshot.stat().st_size > 5000
 
         probe.trigger("close")
@@ -351,8 +373,7 @@ def main():
         except subprocess.TimeoutExpired:
             checks["the app exits after closing"] = False
 
-        for name, ok in checks.items():
-            print(f"{'ok  ' if ok else 'FAIL'} {name}")
+        report()
         print(json.dumps({k: v for k, v in before.items() if k != "lastHtml"}, indent=2))
         print(f"screenshot: {snapshot}")
         talker.send("QUIT :done")

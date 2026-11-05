@@ -275,10 +275,8 @@ fn factory(tx: &Inbox) -> gtk::SignalListItemFactory {
             .hexpand(true)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .build();
-        let badge = gtk::Label::builder()
-            .css_classes([classes::BADGE])
-            .visible(false)
-            .build();
+        let badge = gtk::Label::builder().visible(false).build();
+        badge.add_css_class(classes::BADGE);
         let cell = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         cell.append(&label);
         cell.append(&badge);
@@ -331,13 +329,7 @@ fn factory(tx: &Inbox) -> gtk::SignalListItemFactory {
                     .transform_to(|_, text: String| Some(!text.is_empty()))
                     .build(),
             );
-            bound.bind(
-                item,
-                object
-                    .bind_property("classes", &expander, "css-classes")
-                    .flags(sync)
-                    .build(),
-            );
+            bound.classes(item, &object, expander.upcast_ref());
             if let Some(server) = object.downcast_ref::<ServerRow>() {
                 let id = server.server();
                 let tx = tx.clone();
