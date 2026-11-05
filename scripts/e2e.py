@@ -2,13 +2,17 @@
 """End-to-end check for phase 1.
 
 Starts the real app under Xvfb against a local IRC server, has a second
-client say something in the app's channel, and passes only if the app's
-page shows that line (read from the page's DOM through the probe hook).
+client set the topic and say something in the app's channel, and passes
+only if the app's page shows it (read from the page's DOM through the
+TEXTUAL_GTK_PROBE hook). Then reloads the page and checks the lines come
+back, and closes the window and checks the server sees the app quit.
 
     scripts/e2e.py [--server 127.0.0.1:6667] [--out DIR]
 
-Needs: a built target/debug/textual-gtk, xvfb-run, and an IRC server (the
-local Ergo container: docker start textual-ergo).
+Needs: a built target/debug/textual-gtk, xvfb-run, dbus-run-session, an
+IRC server (the local Ergo: docker start textual-ergo), and on Ubuntu
+24.04+ the AppArmor profile from scripts/dev-setup.sh, without which
+WebKit's sandbox cannot start.
 """
 
 import argparse
@@ -36,14 +40,15 @@ class Client:
         self.buf = b""
         self.send(f"NICK {nick}")
         self.send(f"USER {nick} 0 * :{nick}")
-        self.wait_for(lambda line: " 001 " in line)
+        if self.wait_for(lambda line: " 001 " in line) is None:
+            fail(f"{nick} could not register with the server")
 
     def send(self, line):
         self.sock.sendall(line.encode() + b"\r\n")
 
-    def wait_for(self, predicate, timeout=15):
+    def wait_for(self, predicate, timeout=15, alive=lambda: True):
         deadline = time.time() + timeout
-        while time.time() < deadline:
+        while time.time() < deadline and alive():
             while b"\r\n" in self.buf:
                 raw, self.buf = self.buf.split(b"\r\n", 1)
                 line = raw.decode(errors="replace")
@@ -51,22 +56,43 @@ class Client:
                     self.send("PONG" + line[4:])
                 elif predicate(line):
                     return line
-            self.sock.settimeout(max(0.1, deadline - time.time()))
+            self.sock.settimeout(min(0.5, max(0.1, deadline - time.time())))
             try:
                 chunk = self.sock.recv(4096)
             except socket.timeout:
-                break
+                continue
             if not chunk:
                 break
             self.buf += chunk
         return None
 
 
-def read_probe(path):
-    try:
-        return json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
+class Probe:
+    def __init__(self, prefix, app, log):
+        self.prefix = prefix
+        self.app = app
+        self.log = log
+
+    def state(self):
+        try:
+            return json.loads(self.prefix.with_suffix(".json").read_text())
+        except (OSError, ValueError):
+            return None
+
+    def trigger(self, name):
+        self.prefix.with_suffix(f".{name}").touch()
+
+    def wait_until(self, predicate, what, timeout=20):
+        deadline = time.time() + timeout
+        state = None
+        while time.time() < deadline:
+            if self.app.poll() is not None:
+                fail(f"the app exited with {self.app.returncode} while waiting for {what}; see {self.log}")
+            state = self.state()
+            if state and predicate(state):
+                return state
+            time.sleep(0.2)
+        fail(f"{what} never happened; last probe: {state}")
 
 
 def main():
@@ -78,77 +104,93 @@ def main():
     port = int(port)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    probe = out / "probe"
-    for suffix in (".json", ".png"):
-        probe.with_suffix(suffix).unlink(missing_ok=True)
+    prefix = out / "probe"
+    for suffix in (".json", ".png", ".reload", ".close"):
+        prefix.with_suffix(suffix).unlink(missing_ok=True)
+    log = out / "app.log"
 
     token = secrets.token_hex(4)
     channel = f"#e2e-{token}"
     app_nick = f"app{token}"
+    talker_nick = f"talk{token}"
     binary = ROOT / "target/debug/textual-gtk"
     if not binary.exists():
         fail(f"{binary} is missing; run cargo build")
 
-    env = dict(os.environ, TEXTUAL_GTK_PROBE=str(probe), GSK_RENDERER="cairo")
     # A private D-Bus session keeps GApplication from handing activation to
     # an instance that is already running (a leftover run, or Michael's).
+    env = dict(os.environ, TEXTUAL_GTK_PROBE=str(prefix), GSK_RENDERER="cairo")
     app = subprocess.Popen(
         ["dbus-run-session", "--", "xvfb-run", "-a", "-s", "-screen 0 1100x700x24",
          str(binary), "--server", args.server, "--nick", app_nick, "--channel", channel],
-        env=env, stdout=open(out / "app.log", "w"), stderr=subprocess.STDOUT,
+        env=env, stdout=open(log, "w"), stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    probe = Probe(prefix, app, log)
+    checks = {}
     try:
-        talker = Client(host, port, f"talk{token}")
+        talker = Client(host, port, talker_nick)
         talker.send(f"JOIN {channel}")
-        talker.send(f"TOPIC {channel} :topic {token}")
-        joined = talker.wait_for(lambda l: f"JOIN {channel}" in l and l.startswith(f":{app_nick}!"), 30)
+        talker.send(f"TOPIC {channel} :topic \x02{token}\x02")
+        joined = talker.wait_for(
+            lambda l: l.startswith(f":{app_nick}!") and f"JOIN {channel}" in l,
+            30, alive=lambda: app.poll() is None,
+        )
         if joined is None:
-            talker.send(f"NAMES {channel}")
-            names = talker.wait_for(lambda l: " 353 " in l, 5)
-            if names is None or app_nick not in names:
-                fail(f"the app never joined {channel}; see {out / 'app.log'}")
+            hint = " (is the AppArmor profile from scripts/dev-setup.sh loaded?)" if "bwrap" in log.read_text() else ""
+            fail(f"the app never joined {channel}{hint}; see {log}")
 
         text = f"hello from e2e {token} <script>x</script>"
         talker.send(f"PRIVMSG {channel} :\x02bold\x02 {text}")
+        probe.wait_until(lambda s: text in s.get("last", ""), "the message to show up")
+        time.sleep(2)
+        state = probe.state()
+        checks["the message is the last line"] = text in state["last"]
+        checks["the sender is shown"] = f"<{talker_nick}>" in state["last"]
+        checks["html in the message stays text"] = "<script" not in state["lastHtml"]
+        checks["formatting codes render as markup"] = "<b>bold</b>" in state["lastHtml"]
+        checks["no control characters reach the text"] = not any(ord(c) < 0x20 for c in state["last"])
+        checks["the join line came first"] = state["lines"] >= 2
+        checks["the style faded the page in"] = float(state["bodyOpacity"]) > 0.99
+        checks["the topic bar shows the topic"] = state["topic"].replace("\xa0", " ") == f"topic {token}"
+        before = state
 
-        deadline = time.time() + 20
-        state = None
-        while time.time() < deadline:
-            state = read_probe(probe.with_suffix(".json"))
-            if state and token in state.get("last", ""):
-                break
-            if app.poll() is not None:
-                fail(f"the app exited with {app.returncode}; see {out / 'app.log'}")
-            time.sleep(0.2)
-        else:
-            fail(f"the line never showed up; last probe: {state}")
+        probe.trigger("reload")
+        after = probe.wait_until(
+            lambda s: s["loadedAt"] != before["loadedAt"]
+            and s["lines"] == before["lines"]
+            and float(s["bodyOpacity"]) > 0.99,
+            "the page to reload with its lines back", 15,
+        )
+        checks["a reload brings back every line"] = after["last"] == before["last"]
+        checks["a reload brings back the topic"] = after["topic"] == before["topic"]
+        snapshot = prefix.with_suffix(".png")
+        checks["snapshot written"] = snapshot.exists() and snapshot.stat().st_size > 5000
 
-        time.sleep(3)
-        state = read_probe(probe.with_suffix(".json"))
-        checks = {
-            "message is the last line": token in state["last"],
-            "sender is shown": f"talk{token}" in state["last"],
-            "html in the message stays text": "<script>x</script>" in state["last"],
-            "earlier lines are there too": state["lines"] >= 2,
-            "the style faded the page in": float(state["bodyOpacity"]) > 0.99,
-            "the topic bar shows the topic": state["topic"] == f"topic {token}",
-            "snapshot written": probe.with_suffix(".png").exists(),
-        }
+        probe.trigger("close")
+        quit_line = talker.wait_for(lambda l: l.startswith(f":{app_nick}!") and " QUIT " in l, 10)
+        checks["closing the window quits cleanly"] = quit_line is not None and "Quit" in quit_line
+        try:
+            app.wait(timeout=10)
+            checks["the app exits after closing"] = app.returncode == 0
+        except subprocess.TimeoutExpired:
+            checks["the app exits after closing"] = False
+
         for name, ok in checks.items():
             print(f"{'ok  ' if ok else 'FAIL'} {name}")
-        print(json.dumps(state, indent=2))
-        print(f"screenshot: {probe.with_suffix('.png')}")
+        print(json.dumps({k: v for k, v in before.items() if k != "lastHtml"}, indent=2))
+        print(f"screenshot: {snapshot}")
         talker.send("QUIT :done")
         if not all(checks.values()):
             sys.exit(1)
         print("PASS")
     finally:
-        os.killpg(app.pid, signal.SIGTERM)
-        try:
-            app.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(app.pid, signal.SIGKILL)
+        if app.poll() is None:
+            os.killpg(app.pid, signal.SIGTERM)
+            try:
+                app.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(app.pid, signal.SIGKILL)
 
 
 if __name__ == "__main__":

@@ -2,12 +2,16 @@
 //! `baseLayout`, driven through Textual's own JavaScript API.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk::glib;
 use webkit6::prelude::*;
-use webkit6::{LoadEvent, Settings, UserContentManager, WebContext, WebView};
+use webkit6::{
+    LoadEvent, NavigationPolicyDecision, PolicyDecision, PolicyDecisionType, Settings,
+    UserContentManager, WebContext, WebView,
+};
 
 use crate::style::{Font, Style};
 
@@ -58,16 +62,55 @@ const HANDLERS: &[&str] = &[
     "finishedLayingOutView",
 ];
 
-enum Readiness {
-    /// Lines that arrived before Textual's JS finished loading; Textual
-    /// drops calls made then, so they wait here.
-    Loading(Vec<String>),
-    Ready,
-}
+/// Textual's hard scrollback limit (`messageBuffer.js`). The view keeps
+/// this many lines so it can rebuild the page after a reload or a crash.
+const KEPT_LINES: usize = 1000;
 
 struct Inner {
     view: WebView,
-    readiness: Readiness,
+    page_uri: String,
+    channel: String,
+    /// Whether the current page has finished Textual's load handshake.
+    /// Calls made before then are dropped by Textual's JS, so they wait.
+    ready: bool,
+    lines: VecDeque<(String, String)>,
+    topic: Option<(String, String)>,
+}
+
+impl Inner {
+    fn append_script((html, id): &(String, String)) -> String {
+        format!(
+            "MessageBuffer.bufferElementAppend({}, [{}]);",
+            json(html),
+            json(id)
+        )
+    }
+
+    fn topic_script((plain, html): &(String, String)) -> String {
+        format!("Textual.setTopicBarValue({}, {});", json(plain), json(html))
+    }
+
+    /// Textual's `logViewWebViewFinishedLoading`: set up auto-scroll and the
+    /// view, then put back everything the page should show.
+    fn page_ready(&mut self) {
+        self.ready = true;
+        evaluate(
+            &self.view,
+            &format!(
+                "Textual.viewInitiated(\"channel\", \"client\", \"channel\", {});\
+                 _Textual.viewFinishedLoading({{\"selected\": true, \"visible\": true, \
+                 \"reloadingTheme\": false, \"textSizeMultiplier\": 1.0, \"scrollbackLimit\": 0}});\
+                 _Textual.viewFinishedLoadingHistory();",
+                json(&self.channel)
+            ),
+        );
+        if let Some(topic) = &self.topic {
+            evaluate(&self.view, &Self::topic_script(topic));
+        }
+        for line in &self.lines {
+            evaluate(&self.view, &Self::append_script(line));
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -84,11 +127,9 @@ pub fn prepare_web_context(resources: &Path, pages: &Path) {
 }
 
 impl ChatView {
-    pub fn new(style: &Style, channel: &str, topic: &str, pages: &Path) -> Self {
+    pub fn new(style: &Style, channel: &str, pages: &Path) -> Self {
         let settings = Settings::new();
-        settings.set_allow_file_access_from_file_urls(true);
-        settings.set_allow_universal_access_from_file_urls(true);
-        settings.set_enable_developer_extras(true);
+        settings.set_enable_developer_extras(std::env::var_os("TEXTUAL_GTK_DEVTOOLS").is_some());
         settings.set_enable_back_forward_navigation_gestures(false);
 
         let content = UserContentManager::new();
@@ -99,42 +140,72 @@ impl ChatView {
             .vexpand(true)
             .build();
 
+        let page_uri = match write_page(
+            pages,
+            &style.initial_document(channel, &default_font(), &cache_token()),
+        ) {
+            Ok(path) => glib::filename_to_uri(&path, None)
+                .expect("absolute path")
+                .to_string(),
+            Err(e) => {
+                eprintln!("textual-gtk: cannot write the view page: {e}");
+                String::new()
+            }
+        };
+
         let chat = ChatView {
             inner: Rc::new(RefCell::new(Inner {
                 view: view.clone(),
-                readiness: Readiness::Loading(Vec::new()),
+                page_uri: page_uri.clone(),
+                channel: channel.to_owned(),
+                ready: false,
+                lines: VecDeque::new(),
+                topic: None,
             })),
         };
 
         for &name in HANDLERS {
             let weak = Rc::downgrade(&chat.inner);
             content.connect_script_message_received(Some(name), move |_, value| {
-                if let Some(inner) = weak.upgrade() {
-                    answer_promise(&inner.borrow().view, value);
+                let Some(inner) = weak.upgrade() else { return };
+                if name == "finishedLayingOutView" {
+                    inner.borrow_mut().page_ready();
                 }
+                answer_promise(&inner.borrow().view, value);
             });
             content.register_script_message_handler(name, None);
         }
 
         let weak = Rc::downgrade(&chat.inner);
-        let channel_name = channel.to_owned();
-        let topic = topic.to_owned();
-        view.connect_load_changed(move |_, event| {
-            if event != LoadEvent::Finished {
-                return;
-            }
+        view.connect_decide_policy(move |_, decision, kind| {
+            let Some(inner) = weak.upgrade() else {
+                return false;
+            };
+            keep_on_page(&inner.borrow().page_uri, decision, kind)
+        });
+
+        let weak = Rc::downgrade(&chat.inner);
+        view.connect_web_process_terminated(move |view, reason| {
+            eprintln!("textual-gtk: the view's web process ended ({reason:?}); reloading");
             if let Some(inner) = weak.upgrade() {
-                ChatView { inner }.finish_loading(&channel_name, &topic);
+                let mut inner = inner.borrow_mut();
+                inner.ready = false;
+                view.load_uri(&inner.page_uri);
+            }
+        });
+        view.connect_load_changed({
+            let weak = Rc::downgrade(&chat.inner);
+            move |_, event| {
+                if event == LoadEvent::Started
+                    && let Some(inner) = weak.upgrade()
+                {
+                    inner.borrow_mut().ready = false;
+                }
             }
         });
 
-        let page = write_page(
-            pages,
-            &style.initial_document(channel, &default_font(), &cache_token()),
-        );
-        match page {
-            Ok(path) => view.load_uri(&glib::filename_to_uri(&path, None).expect("absolute path")),
-            Err(e) => eprintln!("textual-gtk: cannot write the view page: {e}"),
+        if !page_uri.is_empty() {
+            view.load_uri(&page_uri);
         }
         chat
     }
@@ -145,12 +216,15 @@ impl ChatView {
 
     /// Appends one rendered line (see `Line::render`).
     pub fn append(&self, html: String, line_id: &str) {
-        let script = format!(
-            "MessageBuffer.bufferElementAppend({}, [{}]);",
-            serde_json::Value::String(html),
-            serde_json::Value::String(line_id.to_owned())
-        );
-        self.run_when_ready(script);
+        let mut inner = self.inner.borrow_mut();
+        let line = (html, line_id.to_owned());
+        if inner.ready {
+            evaluate(&inner.view, &Inner::append_script(&line));
+        }
+        inner.lines.push_back(line);
+        if inner.lines.len() > KEPT_LINES {
+            inner.lines.pop_front();
+        }
     }
 
     /// Shows `topic` (IRC formatting allowed) in the style's topic bar.
@@ -162,9 +236,12 @@ impl ChatView {
         };
         let html = crate::style::body::render(topic, false, &fragment);
         let plain: String = topic.chars().filter(|c| *c >= ' ').collect();
-        let json = |s: String| serde_json::Value::String(s).to_string();
-        let script = format!("Textual.setTopicBarValue({}, {});", json(plain), json(html));
-        self.run_when_ready(script);
+        let mut inner = self.inner.borrow_mut();
+        let topic = (plain, html);
+        if inner.ready {
+            evaluate(&inner.view, &Inner::topic_script(&topic));
+        }
+        inner.topic = Some(topic);
     }
 
     /// Runs `expression` in the page and hands its JSON result to `done`.
@@ -177,39 +254,42 @@ impl ChatView {
             move |result| done(result.ok().and_then(|v| v.to_json(0)).map(Into::into)),
         );
     }
+}
 
-    /// Textual drops calls made before the page finishes loading, so they
-    /// wait until then.
-    fn run_when_ready(&self, script: String) {
-        let mut inner = self.inner.borrow_mut();
-        match &mut inner.readiness {
-            Readiness::Loading(queue) => queue.push(script),
-            Readiness::Ready => evaluate(&inner.view, &script),
-        }
+/// The view only ever shows its own page. Any other navigation (a clicked
+/// link, a script, a new window) is refused, and http(s) links open in the
+/// user's browser instead.
+fn keep_on_page(page_uri: &str, decision: &PolicyDecision, kind: PolicyDecisionType) -> bool {
+    if !matches!(
+        kind,
+        PolicyDecisionType::NavigationAction | PolicyDecisionType::NewWindowAction
+    ) {
+        return false;
     }
-
-    /// Textual's `logViewWebViewFinishedLoading`: the calls that set up
-    /// auto-scroll and the topic, after which lines may be appended.
-    fn finish_loading(&self, channel: &str, topic: &str) {
-        let json = |s: &str| serde_json::Value::String(s.to_owned()).to_string();
-        let setup = format!(
-            "Textual.viewInitiated(\"channel\", \"client\", \"channel\", {channel});\
-             _Textual.viewFinishedLoading({{\"selected\": true, \"visible\": true, \
-             \"reloadingTheme\": false, \"textSizeMultiplier\": 1.0, \"scrollbackLimit\": 0}});\
-             Textual.setTopicBarValue({topic}, {topic});\
-             _Textual.viewFinishedLoadingHistory();",
-            channel = json(channel),
-            topic = json(topic),
+    let uri = decision
+        .downcast_ref::<NavigationPolicyDecision>()
+        .and_then(|d| d.navigation_action())
+        .and_then(|a| a.request())
+        .and_then(|r| r.uri())
+        .map(|u| u.to_string())
+        .unwrap_or_default();
+    if kind == PolicyDecisionType::NavigationAction && uri == page_uri {
+        decision.use_();
+        return true;
+    }
+    decision.ignore();
+    if uri.starts_with("https://") || uri.starts_with("http://") {
+        gtk::UriLauncher::new(&uri).launch(
+            None::<&gtk::Window>,
+            None::<&gtk::gio::Cancellable>,
+            |_| {},
         );
-        let mut inner = self.inner.borrow_mut();
-        evaluate(&inner.view, &setup);
-        if let Readiness::Loading(queue) = std::mem::replace(&mut inner.readiness, Readiness::Ready)
-        {
-            for script in queue {
-                evaluate(&inner.view, &script);
-            }
-        }
     }
+    true
+}
+
+fn json(s: &str) -> String {
+    serde_json::Value::String(s.to_owned()).to_string()
 }
 
 fn evaluate(view: &WebView, script: &str) {

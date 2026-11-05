@@ -11,6 +11,7 @@ use textual_gtk::style::{Appearance, Style};
 use textual_gtk::ui::chat_view::{self, ChatView};
 
 const APP_ID: &str = "io.github.androidkitkat.TextualGtk";
+const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Phase-1 settings, from the command line:
 /// `textual-gtk [--server host:port] [--nick nick] [--channel #chan] [--style name]`.
@@ -66,8 +67,13 @@ fn main() -> glib::ExitCode {
     };
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let resources = resources_dir();
-    let pages = glib::user_cache_dir().join("textual-gtk/pages");
-    let _ = std::fs::remove_dir_all(&pages);
+    let pages = match pages_dir() {
+        Ok(pages) => pages,
+        Err(e) => {
+            eprintln!("textual-gtk: cannot create the page folder: {e}");
+            return glib::ExitCode::FAILURE;
+        }
+    };
     if let Err(e) = std::fs::create_dir_all(&pages) {
         eprintln!("textual-gtk: cannot create {}: {e}", pages.display());
         return glib::ExitCode::FAILURE;
@@ -76,6 +82,7 @@ fn main() -> glib::ExitCode {
 
     let app = adw::Application::builder().application_id(APP_ID).build();
     let tokio_handle = runtime.handle().clone();
+    let pages_for_app = pages.clone();
     app.connect_activate(move |app| {
         let appearance = if adw::StyleManager::default().is_dark() {
             Appearance::Dark
@@ -90,9 +97,30 @@ fn main() -> glib::ExitCode {
                 return;
             }
         };
-        build_window(app, &options, style, &pages, &tokio_handle);
+        build_window(app, &options, style, &pages_for_app, &tokio_handle);
     });
-    app.run_with_args::<&str>(&[])
+    let status = app.run_with_args::<&str>(&[]);
+    let _ = std::fs::remove_dir_all(&pages);
+    status
+}
+
+/// A page folder per process, so a second instance or a test run never
+/// deletes the page a running instance shows. Folders left by processes
+/// that no longer exist are removed.
+fn pages_dir() -> std::io::Result<PathBuf> {
+    let root = glib::user_cache_dir().join("textual-gtk/pages");
+    std::fs::create_dir_all(&root)?;
+    for entry in std::fs::read_dir(&root)?.flatten() {
+        let stale = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+            .is_some_and(|pid| !std::path::Path::new(&format!("/proc/{pid}")).exists());
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    Ok(root.join(std::process::id().to_string()))
 }
 
 fn build_window(
@@ -102,10 +130,7 @@ fn build_window(
     pages: &std::path::Path,
     runtime: &tokio::runtime::Handle,
 ) {
-    let view = ChatView::new(&style, &options.channel, "", pages);
-    if let Some(prefix) = std::env::var_os("TEXTUAL_GTK_PROBE") {
-        install_probe(&view, PathBuf::from(prefix));
-    }
+    let view = ChatView::new(&style, &options.channel, pages);
 
     let entry = gtk::Entry::builder()
         .placeholder_text(format!("Message {}", options.channel))
@@ -113,6 +138,7 @@ fn build_window(
         .margin_end(6)
         .margin_top(6)
         .margin_bottom(6)
+        .sensitive(false)
         .build();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&view.widget());
@@ -134,6 +160,9 @@ fn build_window(
         .default_height(600)
         .content(&toolbar)
         .build();
+    if let Some(prefix) = std::env::var_os("TEXTUAL_GTK_PROBE") {
+        install_probe(&view, &window, PathBuf::from(prefix));
+    }
 
     let connection = connection::spawn(
         runtime,
@@ -182,22 +211,36 @@ fn build_window(
         });
     }
 
+    let quitting = Rc::new(std::cell::Cell::new(false));
     let channel = options.channel.clone();
     let view = view.clone();
     let mut events = connection.events;
+    let entry = entry.clone();
+    let window_for_events = window.clone();
+    let quitting_for_events = quitting.clone();
     glib::spawn_future_local(async move {
         while let Some(event) = events.recv().await {
             match event {
-                Event::Connected | Event::Refused { .. } => {}
-                Event::Registered { nick } => *own_nick.borrow_mut() = nick,
+                Event::Connected => {}
+                Event::Refused { message, reason } => print(Line::new(
+                    LineType::Debug,
+                    "-100",
+                    None,
+                    format!("Not sent ({reason}): {}", message.params.join(" ")),
+                )),
+                Event::Registered { nick } => {
+                    *own_nick.borrow_mut() = nick;
+                    entry.set_sensitive(true);
+                    entry.grab_focus();
+                }
                 Event::Message(message) => {
                     let current = own_nick.borrow().clone();
-                    let topic = match message.command.as_str() {
-                        "332" => message.param(2),
-                        "TOPIC" => message.param(1),
-                        _ => None,
+                    let (topic_channel, topic) = match message.command.as_str() {
+                        "331" => (1, Some("")),
+                        "332" => (1, message.param(2)),
+                        "TOPIC" => (0, message.param(1)),
+                        _ => (0, None),
                     };
-                    let topic_channel = if message.command == "332" { 1 } else { 0 };
                     if let Some(topic) = topic
                         && message
                             .param(topic_channel)
@@ -226,6 +269,11 @@ fn build_window(
                     }
                 }
                 Event::Disconnected(reason) => {
+                    entry.set_sensitive(false);
+                    if quitting_for_events.get() {
+                        window_for_events.destroy();
+                        return;
+                    }
                     let text = match reason {
                         Disconnect::UserQuit => "Disconnected from IRC".to_owned(),
                         Disconnect::ServerClosed => {
@@ -239,25 +287,43 @@ fn build_window(
         }
     });
 
+    // Closing sends QUIT and waits (up to QUIT_WAIT) for the connection to
+    // end, so the server sees a clean quit before the process exits.
     let quit_commands = connection.commands;
-    window.connect_close_request(move |_| {
-        let _ = quit_commands.send(Command::Quit(None));
-        glib::Propagation::Proceed
+    window.connect_close_request(move |window| {
+        if quitting.replace(true) || quit_commands.send(Command::Quit(None)).is_err() {
+            return glib::Propagation::Proceed;
+        }
+        window.set_visible(false);
+        let window = window.clone();
+        glib::timeout_add_local_once(QUIT_WAIT, move || window.destroy());
+        glib::Propagation::Stop
     });
     window.present();
 }
 
 /// For the end-to-end check: once a second, writes what the page shows to
-/// `<prefix>.json` and a snapshot to `<prefix>.png`.
-fn install_probe(view: &ChatView, prefix: PathBuf) {
+/// `<prefix>.json` and a snapshot to `<prefix>.png`. Creating
+/// `<prefix>.reload` reloads the page; `<prefix>.close` closes the window.
+fn install_probe(view: &ChatView, window: &adw::ApplicationWindow, prefix: PathBuf) {
     const STATE: &str = "({\
         lines: document.querySelectorAll('#messageBuffer > .line').length,\
         last: (document.querySelector('#messageBuffer > .line:last-child') || {}).innerText || '',\
+        lastHtml: (document.querySelector('#messageBuffer > .line:last-child') || {}).innerHTML || '',\
         bodyOpacity: getComputedStyle(document.getElementById('body')).opacity,\
-        topic: (document.getElementById('topicBar') || {}).innerText || ''\
+        topic: (document.getElementById('topicBar') || {}).innerText || '',\
+        loadedAt: performance.timeOrigin\
     })";
     let view = view.clone();
+    let window = window.clone();
     glib::timeout_add_seconds_local(1, move || {
+        let trigger = |suffix: &str| std::fs::remove_file(prefix.with_extension(suffix)).is_ok();
+        if trigger("reload") {
+            webkit6::prelude::WebViewExt::reload(&view.widget());
+        }
+        if trigger("close") {
+            window.close();
+        }
         let json_path = prefix.with_extension("json");
         let png_path = prefix.with_extension("png");
         view.query(STATE, move |state| {
