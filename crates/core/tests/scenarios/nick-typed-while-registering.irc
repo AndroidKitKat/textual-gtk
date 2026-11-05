@@ -1,0 +1,20 @@
+# Textual's /nick works once connected, before 001 (`isConnected`). A
+# rejection of the typed nick is the server's answer to the user, printed
+# to the console, and does not move the nick ladder; a rejection of the
+# ladder's nick still does. 001 names the nick we got.
+= nick taken
+> CAP LS 302
+> NICK taken
+> USER textual 0 * Textual
+< :irc.test 421 * CAP :Unknown command
+! type console /nick mine
+> NICK mine
+< :irc.test 433 * mine :Nickname is already in use
+? line console Message(433): mine Nickname is already in use
+! type console nick other
+> NICK other
+< :irc.test 433 * taken :Nickname is already in use
+> NICK taken_
+? notice The nick taken is already in use; trying taken_
+< :irc.test 001 other :Welcome other
+? registered other

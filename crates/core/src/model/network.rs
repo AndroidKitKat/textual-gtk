@@ -639,9 +639,12 @@ impl Network {
             unreachable!("only called while registering");
         };
         let nick = reg.nick().to_owned();
+        let explained = reg.is_ladder_rejection(msg);
         let mut reg_out = registration::Output::default();
         let progress = reg.step(msg, &mut reg_out);
-        self.print_registration_line(msg, &nick, cx, out);
+        if !explained {
+            self.print_registration_line(msg, &nick, cx, out);
+        }
         self.push_output(conn, reg_out, cx, out);
         match progress {
             Progress::Registering(reg) => {
@@ -742,15 +745,12 @@ impl Network {
 
     /// What a server says while we register goes to the console, as in
     /// Textual, except what registration explains itself: CAP, SASL and
-    /// the nick numerics.
+    /// the refusals of the nick ladder's nicks.
     fn print_registration_line(&mut self, msg: &Message, nick: &str, cx: &mut Cx, out: &mut Out) {
         if matches!(
             msg.command.as_str(),
             "CAP"
                 | "AUTHENTICATE"
-                | "432"
-                | "433"
-                | "437"
                 | "900"
                 | "901"
                 | "902"

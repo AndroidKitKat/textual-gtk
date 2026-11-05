@@ -51,14 +51,22 @@ fn name(rng: &mut Rng) -> String {
     }
 }
 
-fn server_line(rng: &mut Rng) -> String {
+/// `ours` is the nick the ladder last sent: a refusal names it or another.
+fn server_line(rng: &mut Rng, ours: &str) -> String {
     let list: Vec<String> = (0..rng.next() % 6).map(|_| name(rng)).collect();
     let list = list.join(" ");
     let sub = rng.pick(&["LS", "LS *", "ACK", "NAK", "NEW", "DEL", "LIST", ""]);
     match rng.next() % 12 {
         0..=5 => format!(":s CAP * {sub} :{list}"),
         6 => format!(":s CAP * {sub}"),
-        7 => format!(":s {} * {} :x", rng.pick(&["433", "432", "437"]), name(rng)),
+        7 => {
+            let refused = if rng.next().is_multiple_of(2) {
+                ours.to_owned()
+            } else {
+                name(rng)
+            };
+            format!(":s {} * {refused} :x", rng.pick(&["433", "432", "437"]))
+        }
         8 => format!("AUTHENTICATE {}", rng.pick(&["+", "*", "\0", "x"])),
         9 => format!(
             ":s {} * {} :{list}",
@@ -89,7 +97,7 @@ fn generated_server_lines_never_panic_or_send_a_bad_line() {
         let mut reg = Registration::start(s, WANTED, &mut out).unwrap();
         let mut fed = Vec::new();
         for _ in 0..40 {
-            let raw = server_line(&mut rng);
+            let raw = server_line(&mut rng, reg.nick());
             let Ok(msg) = Message::parse(&raw) else {
                 continue;
             };

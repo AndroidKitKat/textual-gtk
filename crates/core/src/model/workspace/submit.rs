@@ -221,7 +221,9 @@ impl Run<'_, '_, '_> {
             Verb::Notice => return self.message(spec, args, Speech::Notice),
             Verb::Me => self.me(args),
             Verb::Query => return self.query(spec, args),
-            Verb::Nick if logged_in => match token(args).0 {
+            // Connected, not registered: Textual lets the nick change
+            // before 001 (`IRCClient.m:4008-4011`).
+            Verb::Nick if connected => match token(args).0 {
                 "" => self.invalid(spec),
                 nick => self.send("NICK", &[nick]),
             },

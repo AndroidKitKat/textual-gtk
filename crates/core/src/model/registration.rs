@@ -5,6 +5,7 @@
 use std::fmt;
 
 use crate::irc::caps::Caps;
+use crate::irc::casemap::CaseMapping;
 use crate::irc::sasl::{Mechanism, SaslFailure, SaslOutcome, SaslState};
 use crate::irc::{Message, WireLine};
 use crate::secret::Secret;
@@ -204,6 +205,15 @@ impl Registration {
         &self.nicks.current
     }
 
+    /// Whether `msg` refuses the nick the ladder last sent. A refusal of a
+    /// nick the user typed is the user's to read, and moves nothing.
+    pub fn is_ladder_rejection(&self, msg: &Message) -> bool {
+        matches!(msg.command.as_str(), "433" | "432" | "437")
+            && msg
+                .param(1)
+                .is_none_or(|n| CaseMapping::Rfc1459.same_nick(n, &self.nicks.current))
+    }
+
     /// Takes one server line. Lines registration has no use for (NOTICE,
     /// 020, PING) leave it unchanged.
     pub fn step(mut self, msg: &Message, out: &mut Output) -> Progress {
@@ -223,7 +233,7 @@ impl Registration {
                 let text = msg.params.last().cloned().unwrap_or_default();
                 return Progress::Failed(Failure::ServerError(text));
             }
-            "433" | "432" | "437" => {
+            "433" | "432" | "437" if self.is_ladder_rejection(msg) => {
                 let reason = match msg.command.as_str() {
                     "433" => NickRejection::InUse,
                     "432" => NickRejection::Erroneous,
@@ -245,6 +255,16 @@ impl Registration {
                             tried: self.nicks.tried,
                         });
                     }
+                }
+            }
+            // A NICK the user typed, if the server confirms it before 001.
+            "NICK"
+                if msg.source().is_some_and(|s| {
+                    CaseMapping::Rfc1459.same_nick(s.nick, &self.nicks.current)
+                }) =>
+            {
+                if let Some(new) = msg.param(0) {
+                    new.clone_into(&mut self.nicks.current);
                 }
             }
             "CAP" => {
