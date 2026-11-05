@@ -82,6 +82,7 @@ If Michael hasn't answered, pick a default, log it in `DECISIONS.md`, and keep g
 - **IRC testing:** run a local server (e.g. Ergo in Docker; Docker is installed). Don't test half-built code on Libera.
 - **The pstack plugin is installed.** Route multi-file and design work through `pstack:poteto-mode`.
 - **Reaching Michael:** `~/bin/notify-claudia "<summary>" textual-gtk`.
+- **Remote:** `git@github.com:AndroidKitKat/textual-gtk.git` (`origin`). koya's `~/.ssh/id_ed25519` has push access. Push after each commit.
 
 ## Working rules
 
