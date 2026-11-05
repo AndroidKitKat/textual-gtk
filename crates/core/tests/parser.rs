@@ -85,7 +85,7 @@ fn joins_every_ircdocs_vector() {
             .map(|m| uppercase_verb(&str_of(m).unwrap()))
             .collect();
         let wire = message.to_wire().unwrap();
-        let wire = wire.strip_suffix("\r\n").unwrap().to_owned();
+        let wire = wire.as_str().strip_suffix("\r\n").unwrap().to_owned();
         assert!(
             matches.contains(&wire),
             "{:?}: produced {wire:?}, expected one of {matches:?}",
@@ -113,7 +113,7 @@ fn round_trips_a_tagged_privmsg() {
     let message = Message::parse(line).unwrap();
     assert_eq!(message.tag("msgid"), Some("a b"));
     assert_eq!(message.source().unwrap().nick, "nick");
-    assert_eq!(message.to_wire().unwrap(), format!("{line}\r\n"));
+    assert_eq!(message.to_wire().unwrap().as_str(), format!("{line}\r\n"));
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn every_serialized_line_parses_back_to_itself() {
         params: vec!["#c".into(), ":leading colon".into()],
     };
     let wire = message.to_wire().unwrap();
-    assert_eq!(Message::parse(&wire).unwrap(), message);
+    assert_eq!(Message::parse(wire.as_str()).unwrap(), message);
 }
 
 #[test]

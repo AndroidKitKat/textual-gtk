@@ -187,7 +187,7 @@ impl Message {
     /// The line to send, CRLF included. Fails rather than emit a line that
     /// would parse back as anything other than this message, which also means
     /// the command must already be uppercase letters or digits.
-    pub fn to_wire(&self) -> Result<String, WireError> {
+    pub fn to_wire(&self) -> Result<WireLine, WireError> {
         let mut out = String::with_capacity(64);
         if !self.tags.is_empty() {
             out.push('@');
@@ -244,7 +244,31 @@ impl Message {
             out.push_str(last);
         }
         out.push_str("\r\n");
-        Ok(out)
+        Ok(WireLine(out))
+    }
+}
+
+/// A line that `Message::to_wire` accepted, CRLF included. The transport
+/// only takes these, so nothing unchecked reaches the socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireLine(String);
+
+impl WireLine {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+
+    /// Length on the wire, CRLF included.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
