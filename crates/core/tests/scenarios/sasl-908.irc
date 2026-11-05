@@ -1,0 +1,20 @@
+# A server that did not list mechanisms in LS (sasl without a value) and
+# rejects PLAIN with a 908 list. PLAIN is our only mechanism for SaslPlain, so
+# there is nothing to retry with: CAP END follows. The retry itself, which
+# needs a second mechanism, is in sasl.rs's unit tests.
+= auth sasl-plain
+= account-password pw
+= caps multi-prefix
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.example CAP * LS :multi-prefix sasl
+> CAP REQ :multi-prefix sasl
+< :irc.example CAP * ACK :multi-prefix sasl
+> AUTHENTICATE PLAIN
+< :irc.example 908 * EXTERNAL :are available SASL mechanisms
+< :irc.example 904 * :SASL authentication failed
+> CAP END
+? notice SASL failed: SASL authentication failed
+< :irc.example 001 textual :Welcome
+? registered textual

@@ -1,0 +1,18 @@
+# Ergo's real exchange: two nicks taken, the second padded form is free.
+= nick taken
+= caps multi-prefix
+> CAP LS 302
+> NICK taken
+> USER textual 0 * Textual
+< :ergo.test CAP * LS :multi-prefix
+> CAP REQ multi-prefix
+< :ergo.test CAP * ACK multi-prefix
+> CAP END
+< :ergo.test 433 * taken :Nickname is already in use
+> NICK taken_
+? notice The nick taken is already in use; trying taken_
+< :ergo.test 433 * taken_ :Nickname is already in use
+> NICK taken__
+? notice The nick taken_ is already in use; trying taken__
+< :ergo.test 001 taken__ :Welcome to the ErgoTest IRC Network taken__
+? registered taken__

@@ -1,0 +1,16 @@
+# 432 for a nick over Ergo's NICKLEN (32). NICKLEN is unknown before 001, so
+# the padded form is cut to 9 characters, which any server accepts.
+= nick aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+= caps multi-prefix
+> CAP LS 302
+> NICK aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+> USER textual 0 * Textual
+< :ergo.test CAP * LS :multi-prefix
+> CAP REQ multi-prefix
+< :ergo.test CAP * ACK multi-prefix
+> CAP END
+< :ergo.test 432 * aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa :Erroneous nickname
+> NICK aaaaaaaa_
+? notice The nick aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa was refused by the server; trying aaaaaaaa_
+< :ergo.test 001 aaaaaaaa_ :Welcome to the ErgoTest IRC Network aaaaaaaa_
+? registered aaaaaaaa_

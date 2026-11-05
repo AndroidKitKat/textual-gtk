@@ -1,0 +1,14 @@
+# LS lists the mechanisms and PLAIN is not one: no AUTHENTICATE at all.
+= auth sasl-plain
+= account-password hunter2
+= caps multi-prefix
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.example CAP * LS :multi-prefix sasl=EXTERNAL,SCRAM-SHA-256
+> CAP REQ :multi-prefix sasl
+< :irc.example CAP * ACK :multi-prefix sasl
+> CAP END
+? notice SASL failed: the server offers no mechanism we support (it offers EXTERNAL, SCRAM-SHA-256)
+< :irc.example 001 textual :Welcome
+? registered textual

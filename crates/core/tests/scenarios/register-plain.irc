@@ -1,0 +1,11 @@
+# Ergo 2.19, no auth: the multi-line LS is answered once, after its last line.
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :ergo.test CAP * LS * :account-notify account-tag away-notify batch cap-notify chghost draft/account-registration=before-connect draft/channel-rename draft/chathistory draft/event-playback draft/extended-isupport draft/languages=17,en,~bs,~de,~el,~en-AU,~es,~fi,~fr-FR,~it,~nl,~no,~pl,~pt-BR,~ro,~sq-AL,~tr-TR,~zh-CN draft/metadata-2=before-connect,max-subs=100,max-keys=100 draft/metadata-3=before-connect,max-subs=100,max-keys=100 draft/multiline=max-bytes=4096,max-lines=100 draft/persistence draft/pre-away
+< :ergo.test CAP * LS :draft/read-marker draft/relaymsg=/ draft/whoami echo-message ergo.chat/nope extended-join extended-monitor invite-notify labeled-response message-tags multi-prefix no-implicit-names sasl=PLAIN,EXTERNAL,SCRAM-SHA-256 server-time setname standard-replies userhost-in-names znc.in/playback znc.in/self-message
+> CAP REQ :account-notify away-notify batch cap-notify chghost echo-message extended-join invite-notify message-tags multi-prefix server-time setname userhost-in-names
+< @time=2026-11-05T16:51:12.570Z :ergo.test CAP * ACK :account-notify away-notify batch cap-notify chghost echo-message extended-join invite-notify message-tags multi-prefix server-time setname userhost-in-names
+> CAP END
+< @time=2026-11-05T16:51:15.576Z :ergo.test 001 textual :Welcome to the ErgoTest IRC Network textual
+? registered textual

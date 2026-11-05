@@ -1,0 +1,26 @@
+# Ergo holds 433 until CAP END. The alternate is tried, then the nick padded
+# with _ up to 9 characters, then registration gives up.
+= nick taken
+= alternates taken_
+= caps multi-prefix
+> CAP LS 302
+> NICK taken
+> USER textual 0 * Textual
+< :ergo.test CAP * LS :multi-prefix
+> CAP REQ multi-prefix
+< :ergo.test CAP * ACK multi-prefix
+> CAP END
+< :ergo.test 433 * taken :Nickname is already in use
+> NICK taken_
+? notice The nick taken is already in use; trying taken_
+< :ergo.test 433 * taken_ :Nickname is already in use
+> NICK taken__
+? notice The nick taken_ is already in use; trying taken__
+< :ergo.test 433 * taken__ :Nickname is already in use
+> NICK taken___
+? notice The nick taken__ is already in use; trying taken___
+< :ergo.test 437 * taken___ :Nick/channel is temporarily unavailable
+> NICK taken____
+? notice The nick taken___ is temporarily unavailable; trying taken____
+< :ergo.test 433 * taken____ :Nickname is already in use
+? failed no-usable-nick

@@ -1,0 +1,14 @@
+# CAP NEW before CAP END is requested too, and CAP END waits for its answer.
+= caps away-notify multi-prefix
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.example CAP * LS :multi-prefix
+> CAP REQ multi-prefix
+< :irc.example CAP * NEW :away-notify
+> CAP REQ away-notify
+< :irc.example CAP * ACK multi-prefix
+< :irc.example CAP * ACK away-notify
+> CAP END
+< :irc.example 001 textual :Welcome
+? registered textual

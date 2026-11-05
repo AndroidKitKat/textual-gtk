@@ -1,0 +1,18 @@
+# A NAK refuses the whole batch, so its caps are asked for again one at a
+# time and only the one the server really lacks is lost.
+= caps away-notify bogus-cap multi-prefix
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :ergo.test CAP * LS :away-notify bogus-cap multi-prefix
+> CAP REQ :away-notify bogus-cap multi-prefix
+< :ergo.test CAP * NAK :away-notify bogus-cap multi-prefix
+> CAP REQ away-notify
+> CAP REQ bogus-cap
+> CAP REQ multi-prefix
+< :ergo.test CAP * ACK away-notify
+< :ergo.test CAP * NAK bogus-cap
+< :ergo.test CAP * ACK multi-prefix
+> CAP END
+< :ergo.test 001 textual :Welcome
+? registered textual

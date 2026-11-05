@@ -1,0 +1,8 @@
+# A server without CAP answers CAP LS with 421 and registers us anyway.
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :old.example NOTICE AUTH :*** Looking up your hostname...
+< :old.example 421 * CAP :Unknown command
+< :old.example 001 textual :Welcome to OldNet textual
+? registered textual

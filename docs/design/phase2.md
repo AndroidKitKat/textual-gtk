@@ -160,6 +160,15 @@ Two adversaries probed this design before implementation (`docs/design/phase2-ca
 
 Record accepted deviations here, with their source, before the next unit starts.
 
+Unit 3 (registration):
+
+- Registration takes no clock. The 240 s watchdog is `Link::Registering`'s deadline (unit 4), so the transcript runner rejects `@ +Ns` until a script drives a `Link`.
+- `Registration::step` consumes the registration and returns `Progress::{Registering, Registered, Failed}`, so the secrets it holds are dropped at 001 or failure by construction.
+- `Registration::start` takes the wanted capability list (`caps::WANTED` in the app) and adds `sasl` itself for `Auth::SaslPlain`. Tests pass a longer list to exercise REQ packing past 512 bytes.
+- Padding: "the longest nick the server has already accepted" is read as the longest nick that drew 433 or 437 (taken, so its length was valid). A configured nick already at the limit gets one try with its last character replaced by `_`; without it a 432 for a too-long nick could never register.
+- 908: `Auth::SaslPlain` has one mechanism, so phase 2 never retries; `sasl-908.irc` shows that path and the retry is unit-tested in `irc::sasl` with EXTERNAL then PLAIN. Measured on Ergo: an unknown mechanism draws 904 with no 908.
+- `USER name 0 * Textual`: `to_wire` adds the trailing colon only when needed, so a one-word real name goes out without it. Valid, Ergo accepts it, and phase 1 already sent it this way; the usage example above shows the colon.
+
 ## Open questions (defaults applied; Michael can override)
 
 - `/join` of an unconfigured channel adds it to `config.toml` with autojoin on (Textual's behaviour as far as the notes say; to check in `IRCClient joinChannel`).
