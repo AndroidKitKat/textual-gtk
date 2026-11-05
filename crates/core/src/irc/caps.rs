@@ -26,6 +26,7 @@ pub const WANTED: &[&str] = &[
 
 /// A whole line, CRLF included, as the server must accept it.
 const LINE_LIMIT: usize = 512;
+const REQ_OVERHEAD: usize = "CAP REQ :\r\n".len();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Caps {
@@ -35,9 +36,18 @@ pub struct Caps {
     enabled: BTreeSet<String>,
     /// False until the last line of the LS reply arrives.
     listed: bool,
-    /// REQ batches sent and not yet answered, oldest first. The server
-    /// answers each whole, with one ACK or one NAK.
-    awaiting: Vec<BTreeSet<String>>,
+    /// Caps sent in a REQ and not yet answered. Every key is a `wanted`
+    /// name, so REQ lines are never built from server text.
+    outstanding: BTreeMap<String, Request>,
+    next_batch: u32,
+}
+
+/// The REQ line an outstanding cap went out in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Request {
+    batch: u32,
+    /// Alone on its line, so a NAK refuses this cap itself.
+    alone: bool,
 }
 
 /// What one CAP line changed.
@@ -49,13 +59,17 @@ pub struct CapStep {
 }
 
 impl Caps {
-    /// Panics on a name that is empty or holds a space or line break: the
-    /// names come from this crate's constants, not from input.
+    /// Panics on a name that is empty, holds a space or line break, starts
+    /// with `-` or `:`, or cannot fit a REQ line: the names come from this
+    /// crate's constants, not from input.
     pub fn new<'a>(wanted: impl IntoIterator<Item = &'a str>) -> Self {
         let wanted: BTreeSet<String> = wanted.into_iter().map(str::to_owned).collect();
         for name in &wanted {
             assert!(
-                !name.is_empty() && !name.contains([' ', '\r', '\n', '\0']),
+                !name.is_empty()
+                    && !name.starts_with(['-', ':'])
+                    && !name.contains([' ', '\r', '\n', '\0'])
+                    && REQ_OVERHEAD + name.len() <= LINE_LIMIT,
                 "bad capability name {name:?}"
             );
         }
@@ -64,16 +78,17 @@ impl Caps {
             offered: BTreeMap::new(),
             enabled: BTreeSet::new(),
             listed: false,
-            awaiting: Vec::new(),
+            outstanding: BTreeMap::new(),
+            next_batch: 0,
         }
     }
 
     pub fn ls_request() -> WireLine {
-        wire(&Message::new("CAP", &["LS", "302"]))
+        wire(&["LS", "302"])
     }
 
     pub fn end_request() -> WireLine {
-        wire(&Message::new("CAP", &["END"]))
+        wire(&["END"])
     }
 
     pub fn is_enabled(&self, name: &str) -> bool {
@@ -92,61 +107,66 @@ impl Caps {
 
     /// The LS reply is complete and every REQ has been answered.
     pub fn settled(&self) -> bool {
-        self.listed && self.awaiting.is_empty()
+        self.listed && self.outstanding.is_empty()
     }
 
-    /// Takes a `CAP` message from the server; other commands are ignored.
+    /// Takes a `CAP` message from the server; other commands, and CAP lines
+    /// without a list after the subcommand, are ignored.
     pub fn on_cap(&mut self, msg: &Message) -> CapStep {
         let mut step = CapStep::default();
-        if msg.command != "CAP" {
+        if msg.command != "CAP" || msg.params.len() < 2 {
             return step;
         }
-        let sub = msg.param(1).unwrap_or("").to_ascii_uppercase();
-        let list = msg.params.last().map(String::as_str).unwrap_or("");
-        match sub.as_str() {
+        let (more, list) = match &msg.params[2..] {
+            [star, list] if star == "*" => (true, list.as_str()),
+            [list] if list != "*" => (false, list.as_str()),
+            _ => return step,
+        };
+        let names = list.split_ascii_whitespace();
+        match msg.params[1].to_ascii_uppercase().as_str() {
             "LS" => {
-                let more = msg.params.len() >= 4 && msg.param(2) == Some("*");
                 self.offer(list);
                 if !more {
                     self.listed = true;
-                    step.send = self.request_missing();
+                    self.request_missing(&mut step);
                 }
             }
             "NEW" => {
                 self.offer(list);
-                step.send = self.request_missing();
+                self.request_missing(&mut step);
             }
             "DEL" => {
-                for name in list.split_ascii_whitespace() {
+                for name in names {
                     self.offered.remove(name);
+                    self.outstanding.remove(name);
                     if self.enabled.remove(name) {
                         step.disabled.push(name.to_owned());
                     }
                 }
             }
             "ACK" => {
-                let names = answered(list);
-                self.take_batch(&names);
+                let answered = self.answer(names.clone().map(|n| n.trim_start_matches('-')));
                 for name in names {
-                    if let Some(off) = name.strip_prefix('-') {
-                        if self.enabled.remove(off) {
-                            step.disabled.push(off.to_owned());
+                    let (off, base) = match name.strip_prefix('-') {
+                        Some(base) => (true, base),
+                        None => (false, name),
+                    };
+                    let Some((name, _)) = answered.iter().find(|(n, _)| n == base) else {
+                        continue;
+                    };
+                    if off {
+                        if self.enabled.remove(name) {
+                            step.disabled.push(name.clone());
                         }
-                    } else if self.enabled.insert(name.to_owned()) {
-                        step.enabled.push(name.to_owned());
+                    } else if self.enabled.insert(name.clone()) {
+                        step.enabled.push(name.clone());
                     }
                 }
             }
             "NAK" => {
-                let names = answered(list);
-                let batch = self
-                    .take_batch(&names)
-                    .unwrap_or_else(|| names.iter().map(|n| (*n).to_owned()).collect());
-                if batch.len() > 1 {
-                    for name in batch {
-                        let single = BTreeSet::from([name]);
-                        step.send.push(req_line(&single));
-                        self.awaiting.push(single);
+                for (name, request) in self.answer(names) {
+                    if !request.alone {
+                        self.request(vec![name], &mut step);
                     }
                 }
             }
@@ -162,66 +182,72 @@ impl Caps {
         }
     }
 
-    /// Removes the outstanding batch an ACK or NAK answers. Servers answer in
-    /// order, but matching by content survives one that does not.
-    fn take_batch(&mut self, names: &[&str]) -> Option<BTreeSet<String>> {
-        let answered: BTreeSet<&str> = names.iter().map(|n| n.trim_start_matches('-')).collect();
-        let index = self
-            .awaiting
-            .iter()
-            .position(|b| b.iter().map(String::as_str).eq(answered.iter().copied()))?;
-        Some(self.awaiting.remove(index))
+    /// Settles every REQ an ACK or NAK names any cap of, and returns all
+    /// their caps. A server must answer a REQ whole, so the members it left
+    /// out are answered too; names we never requested are ignored.
+    fn answer<'a>(&mut self, names: impl Iterator<Item = &'a str>) -> Vec<(String, Request)> {
+        let batches: BTreeSet<u32> = names
+            .filter_map(|n| self.outstanding.get(n))
+            .map(|r| r.batch)
+            .collect();
+        let (answered, rest): (BTreeMap<_, _>, _) = std::mem::take(&mut self.outstanding)
+            .into_iter()
+            .partition(|(_, r)| batches.contains(&r.batch));
+        self.outstanding = rest;
+        answered.into_iter().collect()
     }
 
     /// REQ lines for every wanted, offered cap not yet enabled or requested,
     /// packed into as few lines as fit.
-    fn request_missing(&mut self) -> Vec<WireLine> {
-        let pending: BTreeSet<&String> = self.awaiting.iter().flatten().collect();
+    fn request_missing(&mut self, step: &mut CapStep) {
         let missing: Vec<String> = self
             .wanted
             .iter()
             .filter(|n| self.offered.contains_key(*n))
-            .filter(|n| !self.enabled.contains(*n) && !pending.contains(n))
+            .filter(|n| !self.enabled.contains(*n) && !self.outstanding.contains_key(*n))
             .cloned()
             .collect();
-        let batches = pack(missing);
-        let lines = batches.iter().map(req_line).collect();
-        self.awaiting.extend(batches);
-        lines
+        for batch in pack(missing) {
+            self.request(batch, step);
+        }
+    }
+
+    fn request(&mut self, batch: Vec<String>, step: &mut CapStep) {
+        step.send.push(wire(&["REQ", &batch.join(" ")]));
+        let request = Request {
+            batch: self.next_batch,
+            alone: batch.len() == 1,
+        };
+        self.next_batch = self.next_batch.wrapping_add(1);
+        self.outstanding
+            .extend(batch.into_iter().map(|name| (name, request)));
     }
 }
 
-fn answered(list: &str) -> Vec<&str> {
-    list.split_ascii_whitespace().collect()
-}
-
 /// Greedy packing into `CAP REQ :a b c` lines of at most 512 bytes.
-fn pack(names: Vec<String>) -> Vec<BTreeSet<String>> {
-    let overhead = "CAP REQ :\r\n".len();
-    let mut batches: Vec<BTreeSet<String>> = Vec::new();
+fn pack(names: Vec<String>) -> Vec<Vec<String>> {
+    let mut batches: Vec<Vec<String>> = Vec::new();
     let mut used = 0;
     for name in names {
         match batches.last_mut() {
             Some(batch) if used + 1 + name.len() <= LINE_LIMIT => {
                 used += 1 + name.len();
-                batch.insert(name);
+                batch.push(name);
             }
             _ => {
-                used = overhead + name.len();
-                batches.push(BTreeSet::from([name]));
+                used = REQ_OVERHEAD + name.len();
+                batches.push(vec![name]);
             }
         }
     }
     batches
 }
 
-fn req_line(batch: &BTreeSet<String>) -> WireLine {
-    let names: Vec<&str> = batch.iter().map(String::as_str).collect();
-    wire(&Message::new("CAP", &["REQ", &names.join(" ")]))
-}
-
-fn wire(msg: &Message) -> WireLine {
-    msg.to_wire()
+/// Only for parameters built from constants and `wanted` names, which
+/// `Caps::new` checked, so the line is always valid.
+fn wire(params: &[&str]) -> WireLine {
+    Message::new("CAP", params)
+        .to_wire()
         .expect("CAP lines are built from validated capability names")
 }
 
@@ -273,6 +299,99 @@ mod tests {
         caps.on_cap(&line(":s CAP * ACK multi-prefix"));
         assert!(caps.settled());
         assert!(caps.is_enabled("multi-prefix"));
+    }
+
+    #[test]
+    fn an_unmatched_nak_requests_nothing_from_server_text() {
+        let mut caps = Caps::new(WANTED.iter().copied());
+        caps.on_cap(&line(":s CAP * LS :a"));
+        let step = caps.on_cap(&line(":s CAP * NAK :a\0b a\0b2"));
+        assert!(step.send.is_empty(), "{:?}", step.send);
+        let long = "x".repeat(600);
+        let step = caps.on_cap(&line(&format!(":s CAP * NAK :{long} {long}y")));
+        assert!(step.send.is_empty(), "{:?}", step.send);
+        assert!(caps.settled());
+    }
+
+    #[test]
+    fn an_unmatched_nak_leaves_the_real_request_outstanding() {
+        let mut caps = Caps::new(["away-notify", "multi-prefix"]);
+        caps.on_cap(&line(":s CAP * LS :away-notify multi-prefix"));
+        let step = caps.on_cap(&line(":s CAP * NAK :foo bar"));
+        assert!(step.send.is_empty(), "{:?}", sent(&step));
+        assert!(!caps.settled());
+        caps.on_cap(&line(":s CAP * ACK :away-notify multi-prefix"));
+        assert!(caps.settled());
+    }
+
+    fn requested_ab() -> Caps {
+        let mut caps = Caps::new(["away-notify", "multi-prefix"]);
+        let step = caps.on_cap(&line(":s CAP * LS :away-notify multi-prefix"));
+        assert_eq!(sent(&step), ["CAP REQ :away-notify multi-prefix"]);
+        caps
+    }
+
+    #[test]
+    fn a_partial_ack_settles() {
+        let mut caps = requested_ab();
+        let step = caps.on_cap(&line(":s CAP * ACK :away-notify"));
+        assert_eq!(step.enabled, ["away-notify"]);
+        assert!(caps.settled());
+        assert!(!caps.is_enabled("multi-prefix"));
+    }
+
+    #[test]
+    fn a_superset_ack_settles_and_enables_only_what_was_requested() {
+        let mut caps = requested_ab();
+        let step = caps.on_cap(&line(":s CAP * ACK :away-notify multi-prefix sasl"));
+        assert_eq!(step.enabled, ["away-notify", "multi-prefix"]);
+        assert!(caps.settled());
+        assert!(!caps.is_enabled("sasl"));
+    }
+
+    #[test]
+    fn a_nak_of_a_subset_re_requests_the_batch_one_by_one() {
+        let mut caps = requested_ab();
+        let step = caps.on_cap(&line(":s CAP * NAK :away-notify"));
+        assert_eq!(sent(&step), ["CAP REQ away-notify", "CAP REQ multi-prefix"]);
+        caps.on_cap(&line(":s CAP * NAK away-notify"));
+        caps.on_cap(&line(":s CAP * ACK multi-prefix"));
+        assert!(caps.settled());
+        assert_eq!(caps.enabled().collect::<Vec<_>>(), ["multi-prefix"]);
+    }
+
+    #[test]
+    fn a_single_nak_named_twice_is_not_retried_forever() {
+        let mut caps = requested_ab();
+        caps.on_cap(&line(":s CAP * NAK :away-notify multi-prefix"));
+        let step = caps.on_cap(&line(":s CAP * NAK :away-notify multi-prefix"));
+        assert!(step.send.is_empty(), "{:?}", sent(&step));
+        assert!(caps.settled());
+    }
+
+    #[test]
+    fn del_of_a_pending_cap_settles() {
+        let mut caps = Caps::new(["away-notify"]);
+        caps.on_cap(&line(":s CAP * LS :away-notify"));
+        caps.on_cap(&line(":s CAP * DEL :away-notify"));
+        assert!(caps.settled());
+        let step = caps.on_cap(&line(":s CAP * ACK :away-notify"));
+        assert!(step.enabled.is_empty());
+        assert!(!caps.is_enabled("away-notify"));
+    }
+
+    #[test]
+    fn a_missing_list_is_ignored() {
+        let mut caps = Caps::new(["LS", "ACK"]);
+        let step = caps.on_cap(&line(":s CAP * LS"));
+        assert!(step.send.is_empty(), "{:?}", sent(&step));
+        assert_eq!(caps.offered_value("LS"), None);
+        caps.on_cap(&line(":s CAP * LS *"));
+        assert_eq!(caps.offered_value("*"), None);
+        assert!(!caps.settled());
+        let step = caps.on_cap(&line(":s CAP * ACK"));
+        assert!(step.enabled.is_empty());
+        assert!(!caps.is_enabled("ACK"));
     }
 
     #[test]

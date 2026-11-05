@@ -1,0 +1,11 @@
+# SASL is configured but the server has no CAP at all: it answers CAP LS
+# with 421 and registers us. Say that SASL did not happen.
+= auth sasl-plain
+= account-password hunter2
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :old.example 421 * CAP :Unknown command
+< :old.example 001 textual :Welcome to OldNet textual
+? notice SASL failed: the server does not offer SASL
+? registered textual

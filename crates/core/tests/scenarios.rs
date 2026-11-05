@@ -47,3 +47,16 @@ fn the_runner_reports_an_unchecked_notice_and_rejects_time() {
     );
     assert!(support::run_transcript("> CAP LS 302\n@ +5s\n").is_err());
 }
+
+#[test]
+fn a_scenario_without_an_end_state_fails() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/register-plain.irc");
+    let source = std::fs::read_to_string(path).expect("readable scenario");
+    let truncated: Vec<&str> = source.lines().collect();
+    let (last, rest) = truncated.split_last().unwrap();
+    assert!(last.starts_with("? registered"), "{last}");
+    let errors = support::run_transcript(&rest.join("\n")).unwrap_err();
+    assert!(errors.contains("end: no end state"), "{errors}");
+    let registering = "> CAP LS 302\n> NICK textual\n> USER textual 0 * Textual\n? registering\n";
+    assert_eq!(support::run_transcript(registering), Ok(()));
+}

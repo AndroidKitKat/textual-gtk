@@ -182,3 +182,17 @@ fn rejects_lines_without_a_command() {
     assert!(Message::parse(":source.only").is_err());
     assert!(Message::parse("@tag=1").is_err());
 }
+
+#[test]
+fn wire_line_debug_redacts_pass_and_authenticate() {
+    let debug = |msg: Message| format!("{:?}", msg.to_wire().unwrap());
+    let pass = debug(Message::new("PASS", &["hunter2"]));
+    assert_eq!(pass, r#"WireLine("PASS [redacted]")"#);
+    let auth = debug(Message::new("AUTHENTICATE", &["dQB1AGh1bnRlcjI="]));
+    assert_eq!(auth, r#"WireLine("AUTHENTICATE [redacted]")"#);
+    let mut tagged = Message::new("AUTHENTICATE", &["dQB1AGh1bnRlcjI="]);
+    tagged.tags.push(("label".into(), "1".into()));
+    assert!(!debug(tagged).contains("dQB1"));
+    let privmsg = debug(Message::new("PRIVMSG", &["#a", "PASS hunter2"]));
+    assert_eq!(privmsg, r#"WireLine("PRIVMSG #a :PASS hunter2\r\n")"#);
+}

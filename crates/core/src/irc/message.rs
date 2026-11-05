@@ -250,8 +250,30 @@ impl Message {
 
 /// A line that `Message::to_wire` accepted, CRLF included. The transport
 /// only takes these, so nothing unchecked reaches the socket.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WireLine(String);
+
+/// Prints the line, except the parameters of PASS and AUTHENTICATE, which
+/// carry the server password and the SASL credentials.
+impl fmt::Debug for WireLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut rest = self.0.as_str();
+        for prefix in ['@', ':'] {
+            if rest.starts_with(prefix) {
+                rest = rest.split_once(' ').map_or("", |(_, tail)| tail);
+            }
+        }
+        let command = rest.split([' ', '\r']).next().unwrap_or("");
+        if matches!(command, "PASS" | "AUTHENTICATE") {
+            let head = &self.0[..self.0.len() - rest.len() + command.len()];
+            return f
+                .debug_tuple("WireLine")
+                .field(&format_args!("{:?}", format!("{head} [redacted]")))
+                .finish();
+        }
+        f.debug_tuple("WireLine").field(&self.0).finish()
+    }
+}
 
 impl WireLine {
     pub fn as_str(&self) -> &str {

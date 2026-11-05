@@ -60,3 +60,14 @@ fn caps_stay_live_after_001() {
     let sent: Vec<&str> = step.send.iter().map(|l| l.as_str()).collect();
     assert_eq!(sent, ["CAP REQ away-notify\r\n"]);
 }
+
+#[test]
+fn output_debug_does_not_print_secrets() {
+    let mut s = setup("textual");
+    s.server_password = Some(Secret::new("serverpw"));
+    let mut out = Output::default();
+    Registration::start(s, WANTED, &mut out).unwrap();
+    let shown = format!("{out:?}");
+    assert!(!shown.contains("serverpw"), "{shown}");
+    assert!(shown.contains("NICK textual"), "{shown}");
+}

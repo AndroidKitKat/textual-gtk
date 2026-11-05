@@ -209,6 +209,10 @@ impl Registration {
     pub fn step(mut self, msg: &Message, out: &mut Output) -> Progress {
         match msg.command.as_str() {
             "001" => {
+                if self.auth == Auth::SaslPlain && matches!(self.phase, Phase::Negotiating) {
+                    out.notices
+                        .push(Notice::SaslFailed(SaslFailure::NotOffered));
+                }
                 return Progress::Registered(Registered {
                     nick: msg.param(0).unwrap_or(&self.nicks.current).to_owned(),
                     caps: self.caps,

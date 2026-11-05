@@ -112,8 +112,9 @@ impl Script {
 /// - `< line`: a line from the server. Every sent line must have been
 ///   checked before it.
 /// - `? notice text`: the next console notice, as displayed.
-/// - `? registered nick [account]` or `? failed no-usable-nick` or
-///   `? failed error text`.
+/// - `? registered nick [account]`, `? failed no-usable-nick`,
+///   `? failed error text` or `? registering`. Every transcript must end
+///   with one of these, so a truncated one cannot pass.
 /// - `@ +Ns` (virtual time) is rejected until a script drives a `Link`.
 /// - `#` starts a comment; blank lines are skipped.
 pub fn run_transcript(source: &str) -> Result<(), String> {
@@ -121,6 +122,7 @@ pub fn run_transcript(source: &str) -> Result<(), String> {
     let mut wanted: Option<Vec<String>> = None;
     let mut script: Option<Script> = None;
     let mut errors = String::new();
+    let mut ends_in_state = false;
 
     for (index, raw) in source.lines().enumerate() {
         let n = index + 1;
@@ -165,6 +167,7 @@ pub fn run_transcript(source: &str) -> Result<(), String> {
             };
             Script::with_caps(config.clone(), &caps)
         });
+        ends_in_state = kind == "?" && is_end_state(rest);
         match kind {
             ">" => match t.next_sent() {
                 Some(got) if got == rest => {}
@@ -195,11 +198,19 @@ pub fn run_transcript(source: &str) -> Result<(), String> {
             writeln!(errors, "end: unchecked notice {:?}", extra.to_string()).unwrap();
         }
     }
+    if !ends_in_state {
+        errors.push_str("end: no end state (`? registered`, `? failed` or `? registering`)\n");
+    }
     if errors.is_empty() {
         Ok(())
     } else {
         Err(errors)
     }
+}
+
+fn is_end_state(query: &str) -> bool {
+    let what = query.split(' ').next().unwrap_or("");
+    matches!(what, "registered" | "failed" | "registering")
 }
 
 fn check_query(t: &mut Script, query: &str, n: usize, errors: &mut String) {
@@ -225,6 +236,10 @@ fn check_query(t: &mut Script, query: &str, n: usize, errors: &mut String) {
             (("no-usable-nick", _), Progress::Failed(Failure::NoUsableNick { .. })) => None,
             (("error", text), Progress::Failed(Failure::ServerError(got))) if got == text => None,
             (_, other) => Some(format!("{other:?}")),
+        },
+        "registering" => match t.state() {
+            Progress::Registering(_) => None,
+            other => Some(format!("{other:?}")),
         },
         _ => Some(format!("unknown query {what:?}")),
     };
