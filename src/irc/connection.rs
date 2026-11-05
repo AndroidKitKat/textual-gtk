@@ -6,7 +6,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until, timeout};
 
-use super::Message;
+use super::{Message, WireError};
 
 /// Longest line accepted from the server: 8191 bytes of tags plus a 512-byte
 /// body, per the IRCv3 message-tags spec, plus the CRLF.
@@ -33,6 +33,11 @@ pub enum Event {
         nick: String,
     },
     Message(Message),
+    /// A `Command::Send` that could not go on the wire, and why.
+    Refused {
+        message: Message,
+        reason: WireError,
+    },
     /// Always the last event.
     Disconnected(Disconnect),
 }
@@ -84,6 +89,20 @@ async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: &mpsc::UnboundedSender<Event>,
 ) -> io::Result<Disconnect> {
+    let registration = [
+        Message::new("NICK", &[&config.nick]),
+        Message::new("USER", &[&config.username, "0", "*", &config.realname]),
+    ]
+    .iter()
+    .map(Message::to_wire)
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("bad nick or user name: {e}"),
+        )
+    })?;
+
     let connect = timeout(
         CONNECT_TIMEOUT,
         TcpStream::connect((config.host.as_str(), config.port)),
@@ -104,48 +123,81 @@ async fn run(
     let mut state = Registration::Pending {
         attempted_nick: config.nick.clone(),
     };
-    send(&mut writer, &Message::new("NICK", &[&config.nick])).await?;
-    send(
-        &mut writer,
-        &Message::new("USER", &[&config.username, "0", "*", &config.realname]),
-    )
-    .await?;
+    for line in &registration {
+        writer.write_all(line.as_bytes()).await?;
+    }
 
     let mut quit_deadline: Option<Instant> = None;
     loop {
-        tokio::select! {
-            line = reader.next_line() => {
-                let Some(line) = line? else {
-                    return Ok(if quit_deadline.is_some() {
-                        Disconnect::UserQuit
-                    } else {
-                        Disconnect::ServerClosed
-                    });
-                };
-                let Ok(message) = Message::parse(&line) else { continue };
-                for reply in respond(&mut state, &config, &message, events) {
-                    send(&mut writer, &reply).await?;
-                }
-                if events.send(Event::Message(message)).is_err() {
-                    return Ok(Disconnect::UserQuit);
-                }
-            }
-            command = commands.recv(), if quit_deadline.is_none() => match command {
-                Some(Command::Send(message)) => send(&mut writer, &message).await?,
-                Some(Command::Quit(reason)) => {
-                    send(&mut writer, &quit_message(reason)).await?;
+        let step: io::Result<Option<Disconnect>> = tokio::select! {
+            line = reader.next_line() => match line {
+                Ok(Some(line)) => on_line(&line, &mut state, &config, &mut writer, events).await,
+                Ok(None) if quit_deadline.is_some() => Ok(Some(Disconnect::UserQuit)),
+                Ok(None) => Ok(Some(Disconnect::ServerClosed)),
+                Err(e) => Err(e),
+            },
+            command = commands.recv(), if quit_deadline.is_none() => {
+                let (quit, result) = on_command(command, &mut writer, events).await;
+                if quit {
                     quit_deadline = Some(Instant::now() + QUIT_GRACE);
                 }
-                None => {
-                    send(&mut writer, &quit_message(None)).await?;
-                    return Ok(Disconnect::UserQuit);
-                }
-            },
-            () = sleep_until(quit_deadline.unwrap_or_else(Instant::now)), if quit_deadline.is_some() => {
-                return Ok(Disconnect::UserQuit);
+                result.map(|()| None)
             }
+            () = sleep_until(quit_deadline.unwrap_or_else(Instant::now)), if quit_deadline.is_some() => {
+                Ok(Some(Disconnect::UserQuit))
+            }
+        };
+        match step {
+            Ok(None) => {}
+            Ok(Some(reason)) => return Ok(reason),
+            Err(_) if quit_deadline.is_some() => return Ok(Disconnect::UserQuit),
+            Err(e) => return Err(e),
         }
     }
+}
+
+async fn on_line<W: AsyncWriteExt + Unpin>(
+    line: &str,
+    state: &mut Registration,
+    config: &Config,
+    writer: &mut W,
+    events: &mpsc::UnboundedSender<Event>,
+) -> io::Result<Option<Disconnect>> {
+    let Ok(message) = Message::parse(line) else {
+        return Ok(None);
+    };
+    for reply in respond(state, config, &message, events) {
+        match reply.to_wire() {
+            Ok(wire) => writer.write_all(wire.as_bytes()).await?,
+            Err(e) => eprintln!("textual-gtk: not sending {}: {e}", reply.command),
+        }
+    }
+    if events.send(Event::Message(message)).is_err() {
+        return Ok(Some(Disconnect::UserQuit));
+    }
+    Ok(None)
+}
+
+/// Returns whether the user asked to quit (or dropped every sender, which
+/// means the same), and the result of writing.
+async fn on_command<W: AsyncWriteExt + Unpin>(
+    command: Option<Command>,
+    writer: &mut W,
+    events: &mpsc::UnboundedSender<Event>,
+) -> (bool, io::Result<()>) {
+    let (quit, message) = match command {
+        Some(Command::Send(message)) => (false, message),
+        Some(Command::Quit(reason)) => (true, quit_message(reason)),
+        None => (true, quit_message(None)),
+    };
+    let result = match message.to_wire() {
+        Ok(wire) => writer.write_all(wire.as_bytes()).await,
+        Err(reason) => {
+            let _ = events.send(Event::Refused { message, reason });
+            Ok(())
+        }
+    };
+    (quit, result)
 }
 
 /// Resolves once the user asks to quit or drops the handle. Sends queued
@@ -251,18 +303,6 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
                 line.pop();
             }
             return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
-        }
-    }
-}
-
-/// A message `to_wire` refuses is logged and skipped, not treated as a
-/// connection failure: it came from bad input, not a broken socket.
-async fn send<W: AsyncWriteExt + Unpin>(writer: &mut W, message: &Message) -> io::Result<()> {
-    match message.to_wire() {
-        Ok(line) => writer.write_all(line.as_bytes()).await,
-        Err(e) => {
-            eprintln!("textual-gtk: not sending {}: {e}", message.command);
-            Ok(())
         }
     }
 }

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use textual_gtk::irc::Message;
 use textual_gtk::irc::connection::{self, Command, Config, Disconnect, Event};
+use textual_gtk::irc::{Message, WireError};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -168,7 +168,7 @@ async fn refused_lines_are_skipped_without_disconnecting() {
     server.skip_registration().await;
 
     let evil = Message::new("PRIVMSG", &["#textual", "hello\r\nQUIT :pwned"]);
-    handle.commands.send(Command::Send(evil)).unwrap();
+    handle.commands.send(Command::Send(evil.clone())).unwrap();
     server.say("PING :a\rb").await;
     let fine = Message::new("PRIVMSG", &["#textual", "still here"]);
     handle.commands.send(Command::Send(fine)).unwrap();
@@ -177,6 +177,73 @@ async fn refused_lines_are_skipped_without_disconnecting() {
     server.say("PING :ok").await;
     assert_eq!(server.expect().await, "PONG ok");
     assert_eq!(next_event(&mut handle).await, Event::Connected);
+    assert_eq!(
+        next_event(&mut handle).await,
+        Event::Refused {
+            message: evil,
+            reason: WireError::LineBreak
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_reset_after_quitting_still_counts_as_quitting() {
+    let (mut server, mut handle) = start(&[]).await;
+    server.skip_registration().await;
+    handle.commands.send(Command::Quit(None)).unwrap();
+    assert_eq!(server.expect().await, "QUIT");
+    server.say("PING :x").await;
+    let socket = server
+        .lines
+        .into_inner()
+        .into_inner()
+        .reunite(server.writer)
+        .unwrap();
+    socket.set_zero_linger().unwrap();
+    drop(socket);
+    assert_eq!(disconnect_reason(&mut handle).await, Disconnect::UserQuit);
+}
+
+#[tokio::test]
+async fn dropping_the_handle_quits_and_still_reads_the_goodbye() {
+    let (mut server, handle) = start(&[]).await;
+    server.skip_registration().await;
+    let connection::Handle {
+        commands,
+        mut events,
+    } = handle;
+    drop(commands);
+    assert_eq!(server.expect().await, "QUIT");
+    server.say("ERROR :bye").await;
+    drop(server);
+    let mut saw_error = false;
+    loop {
+        match timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+        {
+            Some(Event::Message(m)) if m.command == "ERROR" => saw_error = true,
+            Some(Event::Disconnected(reason)) => break assert_eq!(reason, Disconnect::UserQuit),
+            Some(_) => {}
+            None => panic!("no Disconnected"),
+        }
+    }
+    assert!(saw_error, "the server's ERROR was not read");
+}
+
+#[tokio::test]
+async fn an_unsendable_nick_fails_before_connecting() {
+    let mut handle = connection::spawn(
+        &tokio::runtime::Handle::current(),
+        Config {
+            nick: "a\nb".into(),
+            ..config(1, &[])
+        },
+    );
+    match disconnect_reason(&mut handle).await {
+        Disconnect::Error(e) => assert!(e.contains("bad nick"), "{e}"),
+        other => panic!("expected an error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
