@@ -101,7 +101,7 @@ Work paused after unit 7 at Michael's request. Pick up here.
 
 State when paused:
 - `main` on GitHub has everything reviewed; nothing is left uncommitted that matters (the `.audit/unit*` files are local working notes).
-- A release binary built from 2e34a96 is at `target/release/textual-gtk` for Michael to try (run it with `TEXTUAL_GTK_RESOURCES=~/projects/textual-gtk/resources/styling`; README lists the `--network` keys). It is replaced by any later `cargo build --release`.
+- A release binary built from e608f3a (all of unit 7) is at `target/release/textual-gtk` for Michael to try (run it with `TEXTUAL_GTK_RESOURCES=~/projects/textual-gtk/resources/styling`; README lists the `--network` keys). It is replaced by any later `cargo build --release`.
 - The local Ergo runs in docker as `textual-ergo` (`scripts/test-server.sh` restarts it).
 - Every GUI run by an agent goes through `scripts/headless.sh` or `scripts/e2e.py`, never the desktop.
 
