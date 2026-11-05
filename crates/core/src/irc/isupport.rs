@@ -63,9 +63,10 @@ impl Isupport {
                         self.casemapping = mapping;
                     }
                 }
-                "NICKLEN" => self.nicklen = value.parse().ok(),
+                "NICKLEN" => keep_if_unparsable(&mut self.nicklen, &value),
                 "WHOX" => self.whox = true,
-                "MONITOR" => self.monitor = Some(value.parse().unwrap_or(usize::MAX)),
+                "MONITOR" if value.is_empty() => self.monitor = Some(usize::MAX),
+                "MONITOR" => keep_if_unparsable(&mut self.monitor, &value),
                 "PREFIX" => self.prefix = parse_prefix(&value),
                 "CHANMODES" => {
                     let mut groups = value.split(',').map(str::to_owned);
@@ -177,7 +178,17 @@ fn parse_prefix(value: &str) -> Vec<(char, char)> {
     modes.chars().zip(symbols.chars()).collect()
 }
 
-/// 005 values escape bytes as `\xHH`.
+/// A value that does not parse leaves the previous one, so a garbled line
+/// cannot clear a limit or turn it into "unlimited".
+fn keep_if_unparsable(slot: &mut Option<usize>, value: &str) {
+    if let Ok(parsed) = value.parse() {
+        *slot = Some(parsed);
+    }
+}
+
+/// 005 values escape bytes as `\xHH`, exactly two hex digits. An escape
+/// for a control byte is left as written, so a server cannot slip NUL or
+/// CR into a network name.
 fn unescape(value: &str) -> String {
     let mut out = Vec::with_capacity(value.len());
     let bytes = value.as_bytes();
@@ -186,7 +197,10 @@ fn unescape(value: &str) -> String {
         if bytes[i] == b'\\'
             && bytes.get(i + 1) == Some(&b'x')
             && let Some(hex) = value.get(i + 2..i + 4)
+            && hex.bytes().all(|b| b.is_ascii_hexdigit())
             && let Ok(byte) = u8::from_str_radix(hex, 16)
+            && byte >= 0x20
+            && byte != 0x7F
         {
             out.push(byte);
             i += 4;
@@ -267,6 +281,28 @@ mod tests {
         i.apply(&["-PREFIX", "-NETWORK"]);
         assert_eq!(i.prefix(), &[('o', '@'), ('v', '+')]);
         assert_eq!(i.network, None);
+    }
+
+    #[test]
+    fn escapes_are_strict_and_never_control_bytes() {
+        assert_eq!(
+            parsed(&["NETWORK=a\\x+1b"]).network.as_deref(),
+            Some("a\\x+1b")
+        );
+        assert_eq!(
+            parsed(&["NETWORK=a\\x00b"]).network.as_deref(),
+            Some("a\\x00b")
+        );
+        assert_eq!(parsed(&["NETWORK=a\\x2Fb"]).network.as_deref(), Some("a/b"));
+    }
+
+    #[test]
+    fn an_unparsable_value_keeps_the_previous_one() {
+        let mut i = parsed(&["NICKLEN=30", "MONITOR=100"]);
+        i.apply(&["NICKLEN=abc", "MONITOR=lots"]);
+        assert_eq!((i.nicklen, i.monitor), (Some(30), Some(100)));
+        i.apply(&["MONITOR"]);
+        assert_eq!(i.monitor, Some(usize::MAX));
     }
 
     #[test]
