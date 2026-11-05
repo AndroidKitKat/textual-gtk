@@ -56,15 +56,33 @@ fn splits_every_ircdocs_vector() {
     }
 }
 
+/// The vectors use lowercase verbs; `to_wire` only emits canonical ones.
+fn uppercase_verb(line: &str) -> String {
+    let mut seen_verb = false;
+    line.split(' ')
+        .map(|atom| {
+            let prefix = atom.starts_with('@') || atom.starts_with(':');
+            if seen_verb || prefix || atom.is_empty() {
+                atom.to_owned()
+            } else {
+                seen_verb = true;
+                atom.to_ascii_uppercase()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[test]
 fn joins_every_ircdocs_vector() {
     for case in load("msg-join.yaml") {
-        let message = atoms_to_message(&case["atoms"]);
+        let mut message = atoms_to_message(&case["atoms"]);
+        message.command.make_ascii_uppercase();
         let matches: Vec<String> = case["matches"]
             .as_vec()
             .unwrap()
             .iter()
-            .map(|m| str_of(m).unwrap())
+            .map(|m| uppercase_verb(&str_of(m).unwrap()))
             .collect();
         let wire = message.to_wire().unwrap();
         let wire = wire.strip_suffix("\r\n").unwrap().to_owned();
@@ -126,6 +144,9 @@ fn refuses_to_serialize_anything_that_would_not_round_trip() {
         ),
         ("", &[], WireError::Malformed("command")),
         ("PRIV MSG", &[], WireError::Malformed("command")),
+        ("privmsg", &["#c", "x"], WireError::Malformed("command")),
+        (":evil", &["x"], WireError::Malformed("command")),
+        ("@a=b", &["x"], WireError::Malformed("command")),
     ];
     for (command, params, expected) in cases {
         let message = Message::new(command, params);
@@ -137,6 +158,8 @@ fn refuses_to_serialize_anything_that_would_not_round_trip() {
     assert_eq!(message.to_wire(), Err(WireError::Malformed("source")));
     message.source = None;
     message.tags = vec![("k=v".into(), String::new())];
+    assert_eq!(message.to_wire(), Err(WireError::Malformed("tag key")));
+    message.tags = vec![("a".into(), "1".into()), ("a".into(), "2".into())];
     assert_eq!(message.to_wire(), Err(WireError::Malformed("tag key")));
 }
 

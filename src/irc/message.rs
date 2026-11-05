@@ -185,14 +185,16 @@ fn check_atom(atom: &str, what: &'static str) -> Result<(), WireError> {
 
 impl Message {
     /// The line to send, CRLF included. Fails rather than emit a line that
-    /// would parse back as anything other than this message.
+    /// would parse back as anything other than this message, which also means
+    /// the command must already be uppercase letters or digits.
     pub fn to_wire(&self) -> Result<String, WireError> {
         let mut out = String::with_capacity(64);
         if !self.tags.is_empty() {
             out.push('@');
             for (i, (key, value)) in self.tags.iter().enumerate() {
                 check_atom(key, "tag key")?;
-                if key.contains([';', '=']) {
+                let duplicate = self.tags[..i].iter().any(|(k, _)| k == key);
+                if duplicate || key.contains([';', '=']) {
                     return Err(WireError::Malformed("tag key"));
                 }
                 if value.contains('\0') {
@@ -215,7 +217,13 @@ impl Message {
             out.push_str(source);
             out.push(' ');
         }
-        check_atom(&self.command, "command")?;
+        let canonical = |c: char| c.is_ascii_uppercase() || c.is_ascii_digit();
+        if self.command.contains(['\r', '\n', '\0']) {
+            return Err(WireError::LineBreak);
+        }
+        if self.command.is_empty() || !self.command.chars().all(canonical) {
+            return Err(WireError::Malformed("command"));
+        }
         out.push_str(&self.command);
         if let Some((last, middle)) = self.params.split_last() {
             for param in middle {
