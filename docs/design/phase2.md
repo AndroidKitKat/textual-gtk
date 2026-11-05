@@ -187,6 +187,23 @@ Unit 4 (lifecycle and transport):
 - Flood pacing is in: at most 6 queued lines per 2 s (Textual's defaults), as a sliding window; PONG is exempt. The 30 s connect timeout covers the TCP connect and the TLS handshake together.
 - Transition: `src/irc/connection.rs`, `tests/connection.rs` and the phase-1 `main.rs` stay unchanged and keep `scripts/e2e.py` passing. `io/transport.rs` has its own copy of `LineReader`; the old one goes when unit 6 switches the app over and deletes `connection.rs`.
 
+Unit 5 (membership, print funnel, scrollback, counters):
+
+- Members live on the buffer, not in `Session`: `Body::Channel(ChannelState::{Parted, Joined(Joined { topic, modes, members, names, sync })})`. Buffers outlive links, and a parted channel has no field to hold members, a topic or modes. `Network::end` parts every channel (`MemberDiff::Reset` for each), so a disconnect still drops all membership in one place.
+- `Network` owns its `Buffers` (console, channels, queries). `Network::new` and `update` are crate-private: `Workspace` is the only way in. It routes `Input::Network { server, input }` by `ServerId` and tags each effect with its server.
+- `BufferId(u64)` and `LineId(u64)` come from one per-workspace counter, in order, so a script gives the same ids every run. Unit 8 gives configured channels their config UUID. `Now { mono, wall }` is passed to `Workspace::update`; lines take `wall` and the next id through a `Stamp`, and nothing in the core reads the clock.
+- `Line::from_message(msg, me, &Isupport, stamp)` returns `Destination::{Channel, Query, Nick, Server}`; `Nick` (QUIT, NICK) resolves to the joined channels the nick is in plus its query, before the state changes. Lines carry `msgid`.
+- The workspace applies the counter rule after the network's step, because it owns focus and window state; `Change::Line` is still followed directly by its `Change::Counters`. Following Textual (`IRCClient.m` print completion blocks), only PRIVMSG, NOTICE and ACTION from someone else count; events and our own echoes do not. Focusing a buffer, or activating the window on it, clears its counters.
+- `Effect::Notice` is gone: connection notices print into the console as client lines (command `-100`, Textual's default). Registration chatter and unknown numerics print there too, except CAP, AUTHENTICATE, 432/433/437 and 900-908, which registration explains with its own notices. 401-596 (not 422) print as Textual's `Message(n): ...`. 353 and 366 never print (user-requested `/names` is unit 7); 329 is ignored; 331 clears the topic and prints to the console as an unknown numeric, as Textual does.
+- Routing details: only PRIVMSG opens a query; a user's NOTICE goes to its open query, else the console. A self JOIN sends `MODE #chan` (Textual's `requestModesForChannel`), so 324 fills the modes. A NICK renames the query unless a query with the new nick is open.
+- The hidden WHO goes out only after a join's first 366, not after a later NAMES. WHOX is `WHO #chan %tcuhnfa,152`; the token tells our 354 replies apart. WHO replies set away, user, host and account, not modes (NAMES has already given them).
+- Highlight is Textual's exact match (no letter or digit on either side), with both sides folded by the server's casemap. Keyword lists are phase 3.
+- Scrollback keeps 1000 lines per buffer (Textual's visible limit defaults to unlimited).
+- A CASEMAPPING change re-keys every member list (a `Reset` each). Known limitation: a PREFIX change after members exist does not re-map their mode bits.
+- Added for testability: `workspace::Input::Say { buffer, text }` sends one PRIVMSG and prints it locally unless echo-message is on (unit 7 replaces it with commands and splitting), and `UiAction::Close` closes a query or channel (PART if joined) and moves the focus to the row above.
+- Not in this unit: KICK auto-rejoin, rejoin after reconnect and autojoin (registration's "After 001" steps).
+- The transcript runner now drives a `Workspace` with one network for every script, and after each step checks that a view built only from `Change`s (members by the design's reset rule, lines, buffer ids) matches the workspace. `! welcome [caps]` registers without checks for scripts about later behaviour.
+
 ## Open questions (defaults applied; Michael can override)
 
 - `/join` of an unconfigured channel adds it to `config.toml` with autojoin on (Textual's behaviour as far as the notes say; to check in `IRCClient joinChannel`).
