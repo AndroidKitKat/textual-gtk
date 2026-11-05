@@ -69,12 +69,47 @@ Written 2026-11-05 from the conversation in which Michael proposed the project.
   - `src/line.rs`: messages to Textual log lines (wording, nick colours, timestamps).
   - `src/ui/chat_view.rs`: the WebKit view and Textual's JS handshake.
 - **Deferred from phase 1 to phase 2:** outgoing line length limits and splitting, PING idle timeout, registration failures other than 433, NAMES/member tracking (QUIT and NICK lines currently show in the one channel regardless), links, channel and nick tagging in bodies. Also: show a visible notice (not only stderr) when the view gives up after repeated web-process crashes, and echo a sent line only after the connection accepts it. From the unit 6 re-review: a query renamed by NICK keeps its old nick in its page file, so a reload shows the old name to styles that read `channelName` (regenerate the page on rename); kick-rejoin omits Textual's `errorOnLastJoinAttempt` condition (needs per-channel join-error state); `--help` after a flag that takes a value is read as that value.
-- **Phase 2, units 1-6 done (2026-11-05):** `docs/design/phase2.md` is the contract. `crates/core` holds the protocol, lifecycle, membership, print funnel, scrollback, counters, autojoin and the pure `Workspace`; the app runs on it through one loop (`src/app.rs`) with the sidebar, member list, chat stack and title in `src/ui`. `scripts/e2e.py` drives two networks on the local Ergo. The phase-1 connection code is gone. Next: unit 7 (input), unit 8 (config and secrets).
+- **Phase 2, units 1-6 done (2026-11-05):** `docs/design/phase2.md` is the contract. `crates/core` holds the protocol, lifecycle, membership, print funnel, scrollback, counters, autojoin and the pure `Workspace`; the app runs on it through one loop (`src/app.rs`) with the sidebar, member list, chat stack and title in `src/ui`. `scripts/e2e.py` drives two networks on the local Ergo. The phase-1 connection code is gone. - **Phase 2, unit 7 done (2026-11-05):** a multi-line input with Textual's commands, wire splitting, history and Tab completion, checked against ports of Textual's own algorithms. Its fix round (5a1d271..6b235e9) matched the review's Textual differences and passed re-review; the re-review's three small findings are in the backlog below.
+
+## What's next (written 2026-11-05, before a break)
+
+Work paused after unit 7 at Michael's request. Pick up here.
+
+1. **Unit 8: config and secrets** (last unit of phase 2; the design is `docs/design/phase2.md`, "Config and secrets", plus its Implementation reconciliation entries).
+   - `config.toml` (networks, servers, identity, auth, channels) and `state.toml` (selection, expanded rows, window size, `last_server_time`), defaults stripped, versioned with migrations, atomic writes; replace the `--network` flags (keep them only as overrides, or drop them).
+   - Secrets in libsecret through `oo7`: server password, NickServ/SASL password, channel keys; nothing in the TOML. `SecretsLoaded` gates connecting so a locked keyring never blocks the window.
+   - Widen or map `BufferId(u64)` so configured channels keep their config UUID; validate config so `add_network` cannot hit its duplicate-id assert; `UiAction::Close` on a configured channel must remove it from the config.
+   - Preferences that are flags today move into the config with Textual's defaults: `--rejoin-on-kick`, `--input-history-per-buffer`, `--command-return-sends-action`, `--control-enter-sends-message`, `focus_on_message_command`, completion suffix.
+   - A minimal Add Server dialog (name, address, port, TLS, nick, auth, password).
+   - e2e: restart restores servers, selection and expansion; SASL PLAIN against an Ergo account; TLS with `verify = true` ending in BadCertificate on Ergo's self-signed port.
+2. **Backlog found by reviews, not yet fixed** (low unless marked):
+   - Medium-low (unit 7 re-review): the nick ladder only advances on a 432/433/437 that names its exact nick (rfc1459 fold); a server that truncates or normalises the nick in its reply leaves registration stuck until the 240 s watchdog. Textual advances on any refusal before 001; fix by tracking the nicks the user typed instead.
+   - Low (unit 7 re-review): `Debug for WireLine` misses lower-case or space-padded `pass`/`authenticate` lines sent with `/raw` (latent: nothing prints them today); make the check case-insensitive and skip runs of spaces.
+   - Low (unit 7 re-review): `/ctcp nick VERSION` sends `\x01VERSION\x01`; Textual sends `VERSION ` with a trailing space. Under the copy-Textual rule, match it. Textual's `/ctcp` also takes its target from the selected channel in one case.
+   - Medium: a 005 PREFIX change after a channel is joined re-ranks members without a MemberDiff, so the member list drifts.
+   - CTCP: only ACTION is handled; Textual answers VERSION, PING, TIME and so on, and prints CTCP replies. Non-ACTION CTCP is dropped today.
+   - A query renamed by NICK keeps its old nick in its page file (regenerate the page on rename).
+   - Kick-rejoin omits Textual's `errorOnLastJoinAttempt` condition.
+   - Show a visible notice (not only stderr) when a chat view gives up after repeated web-process crashes.
+   - Hidden WHO with no 315 swallows the user's own later WHO replies for that channel; a 353 collected before a QUIT can resurrect the quitter at 366; pre-001 PRIVMSG/NOTICE from users are dropped.
+   - `/names` replies are hidden (Textual shows them in a utility window); Textual commands not yet mapped still go out raw (`server`, cycle/hop/rejoin, umode, who, list).
+   - The link detector is a stand-in (scheme:// and www. to whitespace); real link parsing comes with linkification.
+   - Transport: a write error can lose a server's final ERROR; a peer that stops reading stalls PONG until the idle close.
+   - `--help` after a flag that takes a value is read as that value.
+3. **Phase 3** (parity): preferences window; the "Textual for Mac" appearance stylesheet (needs screenshots of Textual on Michael's Mac); highlight keywords and ignores; notifications; logging and history search; links, inline media; DCC; the remaining dialogs (server and channel properties, moderation); menus for connect/disconnect and the rest of Textual's menu-only actions; OTR decision.
+4. **Phase 4**: plugin API, user scripts, user styles, porting the useful plugins.
+
+State when paused:
+- `main` on GitHub has everything reviewed; nothing is left uncommitted that matters (the `.audit/unit*` files are local working notes).
+- A release binary built from 2e34a96 is at `target/release/textual-gtk` for Michael to try (run it with `TEXTUAL_GTK_RESOURCES=~/projects/textual-gtk/resources/styling`; README lists the `--network` keys). It is replaced by any later `cargo build --release`.
+- The local Ergo runs in docker as `textual-ergo` (`scripts/test-server.sh` restarts it).
+- Every GUI run by an agent goes through `scripts/headless.sh` or `scripts/e2e.py`, never the desktop.
 
 ## Open decisions (Michael)
 
-- **OTR:** keep it (via libotr) or drop it?
-- **How faithful:** copy macOS layout details literally, or adapt them to GNOME's HIG? The default is to keep Textual's structure and behaviour and use libadwaita's idiom.
+- **OTR:** keep it (via libotr) or drop it? Due in phase 3.
+- **Leaving comment:** Textual's default is "Textual IRC Client: www.textualapp.com"; ours is "Textual GTK" so we do not advertise another app. Michael can change it.
+- Answered: copy Textual's behaviour and defaults as closely as possible, with libadwaita plus a "Textual for Mac" stylesheet setting (see `DECISIONS.md`).
 
 If Michael hasn't answered, pick a default, log it in `DECISIONS.md`, and keep going.
 
