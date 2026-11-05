@@ -44,6 +44,8 @@ pub enum Change {
     },
     Focus(BufferId),
     Expanded(ServerId),
+    /// The network's `Link` moved to another variant.
+    Link(ServerId),
 }
 
 /// Ids handed out by one workspace, in order.

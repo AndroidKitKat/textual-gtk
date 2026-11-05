@@ -435,6 +435,8 @@ pub fn run_transcript_hiding(source: &str, hide: fn(&Change) -> bool) -> Result<
         tls: Tls::Off,
         auto_reconnect: true,
         setup: setup("textual"),
+        name: "test".to_owned(),
+        autojoin: Vec::new(),
         wanted_caps: WANTED.iter().map(|c| (*c).to_owned()).collect(),
     };
     let mut driver: Option<Driver> = None;
@@ -554,6 +556,19 @@ fn configure(config: &mut ServerConfig, rest: &str) -> Result<(), String> {
             };
         }
         "auto-reconnect" => config.auto_reconnect = value == "on",
+        "name" => value.clone_into(&mut config.name),
+        "autojoin" => {
+            config.autojoin = value
+                .split_whitespace()
+                .map(|entry| {
+                    let (name, key) = entry.split_once(':').unwrap_or((entry, ""));
+                    network::ChannelConfig {
+                        name: name.to_owned(),
+                        key: (!key.is_empty()).then(|| key.to_owned()),
+                    }
+                })
+                .collect();
+        }
         _ => return Err(format!("unknown setting {key:?}")),
     }
     Ok(())

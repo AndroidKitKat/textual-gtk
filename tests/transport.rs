@@ -380,6 +380,8 @@ async fn a_network_registers_on_ergo_over_tls_and_quits() {
             server_password: None,
             account_password: None,
         },
+        name: "ergo".into(),
+        autojoin: Vec::new(),
         wanted_caps: WANTED.iter().map(|c| (*c).to_owned()).collect(),
     };
     ws.add_network(config, &mut workspace::Out::default());
@@ -480,6 +482,8 @@ async fn a_workspace_follows_members_on_ergo() {
                 server_password: None,
                 account_password: None,
             },
+            name: "ergo".into(),
+            autojoin: Vec::new(),
             wanted_caps: WANTED.iter().map(|c| (*c).to_owned()).collect(),
         },
         &mut workspace::Out::default(),

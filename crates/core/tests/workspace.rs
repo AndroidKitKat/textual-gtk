@@ -22,6 +22,8 @@ fn config(id: u128, host: &str) -> ServerConfig {
         tls: Tls::Off,
         auto_reconnect: true,
         setup: support::setup("textual"),
+        name: host.to_owned(),
+        autojoin: Vec::new(),
         wanted_caps: WANTED.iter().map(|c| (*c).to_owned()).collect(),
     }
 }

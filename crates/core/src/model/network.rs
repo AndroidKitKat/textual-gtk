@@ -83,14 +83,25 @@ pub enum Tls {
     },
 }
 
+/// A channel the network joins once it is online.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelConfig {
+    pub name: String,
+    pub key: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub id: ServerId,
+    /// What the sidebar calls this network.
+    pub name: String,
     /// Tried in turn, one per attempt.
     pub addresses: Vec<Address>,
     pub tls: Tls,
     pub auto_reconnect: bool,
     pub setup: Setup,
+    /// Joined after 001, keyed and unkeyed JOINs on separate lines.
+    pub autojoin: Vec<ChannelConfig>,
     /// Normally `caps::WANTED`; `sasl` is added for `Auth::SaslPlain`.
     pub wanted_caps: Vec<String>,
 }
