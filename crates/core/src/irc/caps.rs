@@ -39,6 +39,10 @@ pub struct Caps {
     /// Caps sent in a REQ and not yet answered. Every key is a `wanted`
     /// name, so REQ lines are never built from server text.
     outstanding: BTreeMap<String, Request>,
+    /// Caps whose REQ an ACK settled without naming them. A server that
+    /// splits its ACK of one REQ over two lines names them on the next line,
+    /// so they can still be enabled.
+    unconfirmed: BTreeSet<String>,
     next_batch: u32,
 }
 
@@ -79,6 +83,7 @@ impl Caps {
             enabled: BTreeSet::new(),
             listed: false,
             outstanding: BTreeMap::new(),
+            unconfirmed: BTreeSet::new(),
             next_batch: 0,
         }
     }
@@ -117,13 +122,17 @@ impl Caps {
         if msg.command != "CAP" || msg.params.len() < 2 {
             return step;
         }
+        let subcommand = msg.params[1].to_ascii_uppercase();
         let (more, list) = match &msg.params[2..] {
             [star, list] if star == "*" => (true, list.as_str()),
             [list] if list != "*" => (false, list.as_str()),
+            // A server with no caps may end LS with no list at all; treating
+            // it as empty lets registration reach CAP END.
+            [] if subcommand == "LS" => (false, ""),
             _ => return step,
         };
         let names = list.split_ascii_whitespace();
-        match msg.params[1].to_ascii_uppercase().as_str() {
+        match subcommand.as_str() {
             "LS" => {
                 self.offer(list);
                 if !more {
@@ -139,6 +148,7 @@ impl Caps {
                 for name in names {
                     self.offered.remove(name);
                     self.outstanding.remove(name);
+                    self.unconfirmed.remove(name);
                     if self.enabled.remove(name) {
                         step.disabled.push(name.to_owned());
                     }
@@ -146,24 +156,37 @@ impl Caps {
             }
             "ACK" => {
                 let answered = self.answer(names.clone().map(|n| n.trim_start_matches('-')));
+                let named: BTreeSet<&str> =
+                    names.clone().map(|n| n.trim_start_matches('-')).collect();
+                for (name, _) in &answered {
+                    if !named.contains(name.as_str()) {
+                        self.unconfirmed.insert(name.clone());
+                    }
+                }
                 for name in names {
                     let (off, base) = match name.strip_prefix('-') {
                         Some(base) => (true, base),
                         None => (false, name),
                     };
-                    let Some((name, _)) = answered.iter().find(|(n, _)| n == base) else {
+                    let ours =
+                        answered.iter().any(|(n, _)| n == base) || self.unconfirmed.remove(base);
+                    if !ours {
                         continue;
-                    };
+                    }
+                    let name = base.to_owned();
                     if off {
-                        if self.enabled.remove(name) {
-                            step.disabled.push(name.clone());
+                        if self.enabled.remove(&name) {
+                            step.disabled.push(name);
                         }
                     } else if self.enabled.insert(name.clone()) {
-                        step.enabled.push(name.clone());
+                        step.enabled.push(name);
                     }
                 }
             }
             "NAK" => {
+                for name in names.clone() {
+                    self.unconfirmed.remove(name);
+                }
                 for (name, request) in self.answer(names) {
                     if !request.alone {
                         self.request(vec![name], &mut step);
@@ -383,15 +406,33 @@ mod tests {
     #[test]
     fn a_missing_list_is_ignored() {
         let mut caps = Caps::new(["LS", "ACK"]);
+        let step = caps.on_cap(&line(":s CAP * LS *"));
+        assert!(step.send.is_empty(), "{:?}", sent(&step));
+        assert_eq!(caps.offered_value("*"), None);
+        assert!(!caps.settled());
         let step = caps.on_cap(&line(":s CAP * LS"));
         assert!(step.send.is_empty(), "{:?}", sent(&step));
         assert_eq!(caps.offered_value("LS"), None);
-        caps.on_cap(&line(":s CAP * LS *"));
-        assert_eq!(caps.offered_value("*"), None);
-        assert!(!caps.settled());
         let step = caps.on_cap(&line(":s CAP * ACK"));
         assert!(step.enabled.is_empty());
         assert!(!caps.is_enabled("ACK"));
+    }
+
+    #[test]
+    fn a_split_ack_still_enables_the_second_half() {
+        let mut caps = requested_ab();
+        caps.on_cap(&line(":s CAP * ACK :away-notify"));
+        assert!(caps.settled());
+        let step = caps.on_cap(&line(":s CAP * ACK :multi-prefix"));
+        assert_eq!(step.enabled, ["multi-prefix"]);
+        assert!(caps.is_enabled("away-notify") && caps.is_enabled("multi-prefix"));
+    }
+
+    #[test]
+    fn a_bare_final_ls_ends_the_listing() {
+        let mut caps = Caps::new(["a"]);
+        caps.on_cap(&line(":s CAP * LS"));
+        assert!(caps.settled());
     }
 
     #[test]
