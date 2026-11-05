@@ -219,7 +219,7 @@ impl Run<'_, '_, '_> {
             Verb::Part if logged_in => return self.part(args),
             Verb::Msg => return self.message(spec, args, Speech::Privmsg),
             Verb::Notice => return self.message(spec, args, Speech::Notice),
-            Verb::Me => self.me(args),
+            Verb::Me => return self.me(spec, args),
             Verb::Query => return self.query(spec, args),
             // Connected, not registered: Textual lets the nick change
             // before 001 (`IRCClient.m:4008-4011`).
@@ -383,10 +383,10 @@ impl Run<'_, '_, '_> {
         After::Nothing
     }
 
-    /// `/msg` and `/notice` (`IRCClient.m:4720-4943`): every target gets
-    /// the message; a nick without a query gets one, and the first target
-    /// is focused (`FocusSelectionOnMessageCommandExecution`). A channel
-    /// we have no buffer for is sent to without an echo.
+    /// `/msg`, `/notice`, and `/me` in the console (`IRCClient.m:4720-4943`):
+    /// every target gets the message; a nick without a query gets one, and
+    /// the first target is focused (`FocusSelectionOnMessageCommandExecution`).
+    /// A channel we have no buffer for is sent to without an echo.
     fn message(&mut self, spec: &Spec, args: &str, speech: Speech) -> After {
         if !self.net.is_logged_in() {
             let console = self.net.buffers().console().id();
@@ -399,9 +399,11 @@ impl Run<'_, '_, '_> {
             self.invalid(spec);
             return After::Nothing;
         }
-        if text.is_empty() {
-            return After::Nothing;
-        }
+        let text = match text {
+            "" if speech == Speech::Action => " ",
+            "" => return After::Nothing,
+            text => text,
+        };
         let mut focus = None;
         for target in targets.split(',') {
             let isupport = self.isupport();
@@ -427,34 +429,23 @@ impl Run<'_, '_, '_> {
         }
     }
 
-    /// `/me`: to the channel or query it was typed in; in the console the
-    /// first word is the target.
-    fn me(&mut self, args: &str) {
+    /// `/me`: to the channel or query it was typed in; in the console it
+    /// is `/msg` as an action, an empty one being a space.
+    fn me(&mut self, spec: &Spec, args: &str) -> After {
         if !self.net.is_logged_in() {
             let console = self.net.buffers().console().id();
             self.net
                 .print_client(console, network::NOT_CONNECTED, self.cx, self.out);
-            return;
+            return After::Nothing;
         }
-        let here = self.channel_here().or_else(|| self.query_here());
-        let (target, text, echo) = match here {
-            Some(name) => (name, args, Some(self.here)),
-            None => {
-                let (target, text) = token(args);
-                let casemap = self.net.casemap();
-                let echo = match self.net.buffers().find_channel(casemap, target) {
-                    Some(id) => Some(id),
-                    None if self.is_nickname(target) => {
-                        Some(self.net.open_query(target, self.cx.ids, self.out))
-                    }
-                    None => None,
-                };
-                (target.to_owned(), text, echo)
-            }
+        let Some(target) = self.channel_here().or_else(|| self.query_here()) else {
+            return self.message(spec, args, Speech::Action);
         };
-        let text = if text.is_empty() { " " } else { text };
+        let text = if args.is_empty() { " " } else { args };
+        let here = self.here;
         self.net
-            .send_text(&target, Speech::Action, text, echo, self.cx, self.out);
+            .send_text(&target, Speech::Action, text, Some(here), self.cx, self.out);
+        After::Nothing
     }
 
     /// `/query nick [text]` opens and focuses the query, connected or not.

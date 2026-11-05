@@ -92,6 +92,13 @@
 ! type console /me waves at carol
 > PRIVMSG waves :ACTION at carol
 ? buffers = console #new #other waves
+? focus waves
+! type console /me #new,dave both
+> PRIVMSG #new :ACTION both
+> PRIVMSG dave :ACTION both
+? focus #new
+! type console /me dave
+> PRIVMSG dave :ACTION  
 ! type console quit see you
 > QUIT :see you
 ? quitting
