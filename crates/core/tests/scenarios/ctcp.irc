@@ -1,0 +1,15 @@
+# /ctcp and /ctcpreply (`IRCClient.m:3227-3262`): the command uppercased,
+# PING with the time as Textual's `sendCTCPPing:` writes it.
+! welcome
+! type console /ctcp bob version
+> PRIVMSG bob VERSION
+! type console /ctcp bob ping
+> PRIVMSG bob :PING 1800000000.000000
+! type console /ctcp bob clientinfo extra words
+> PRIVMSG bob :CLIENTINFO extra words
+! type console /ctcpreply bob version Textual GTK
+> NOTICE bob :VERSION Textual GTK
+! type console /ctcp bob
+? line console Invalid syntax: “CTCP <nickname> <command> [extra]“
+? notice Invalid syntax: “CTCP <nickname> <command> [extra]“
+? registered textual

@@ -1,0 +1,55 @@
+# Textual's member commands (`IRCClient.m:3282-3340`, 3738-3832): /op and
+# its kin pack as many nicks per MODE as MODES allows; the ban family bans
+# a member's *!user@host, nick!*@* when the address is unknown, or the nick
+# as typed for someone not in the channel. A mode the server has no prefix
+# for is refused.
+! welcome
+< :irc.test 005 textual CHANTYPES=# PREFIX=(ov)@+ MODES=3 KICKLEN=10 TOPICLEN=5 NETWORK=TestNet :are supported by this server
+< :textual!u@h JOIN #c
+> MODE #c
+< :irc.test 353 textual = #c :@textual bob
+< :irc.test 366 textual #c :End of NAMES list
+> WHO #c
+< :dave!~d@dave.host JOIN #c
+! type #c /op dave bob carol erin
+> MODE #c +ooo dave bob carol
+> MODE #c +o erin
+! type #c /deop #other  dave
+> MODE #other -o dave
+! type #c /devoice dave
+> MODE #c -v dave
+! type #c /halfop dave
+? line #c The mode +h is not supported on this server
+! type #c /voice
+? line #c Invalid syntax: “VOICE [channel] <nickname>“
+! type console /op dave
+? line console This command can only be used with a channel.
+? notice This command can only be used with a channel.
+! type #c /ban dave
+> MODE #c +b *!~d@dave.host
+! type #c /unban bob
+> MODE #c -b bob!*@*
+! type #c /ban #other dave
+> MODE #other +b dave
+! type #c /quiet zed
+> MODE #c +q zed
+! type #c /unquiet zed
+> MODE #c -q zed
+! type #c /kb dave out
+> MODE #c +b *!~d@dave.host
+> KICK #c dave out
+! type #c /kickban
+? line #c Invalid syntax: “KICKBAN [channel] <nickname> [comment]“
+! type #c /kick dave far too long a reason
+? line #c You have exceeded the maximum kick message length for TestNet which is 10 characters. The end of your kick message may have been cut off.
+> KICK #c dave :far too long a reason
+! type #c /topic longer
+? line #c You have exceeded the maximum topic length for TestNet which is 5 characters. The end of your topic may have been cut off.
+> TOPIC #c longer
+! type #c /topic short
+> TOPIC #c short
+! type #c /names #c,#d
+> NAMES #c,#d
+! type #c /names
+? line #c Invalid syntax: “NAMES <channel>“
+? registered textual

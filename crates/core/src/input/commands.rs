@@ -9,12 +9,22 @@ pub enum Verb {
     Away,
     Close,
     Conn,
+    /// `/ctcp`, or `/ctcpreply` with `reply`.
+    Ctcp {
+        reply: bool,
+    },
     Invite,
     Join,
-    Kick,
+    Kick(KickBan),
     Me,
+    /// `/op` and its kin: set or unset a member prefix mode.
+    Member {
+        mode: char,
+        set: bool,
+    },
     Mode,
     Msg,
+    Names,
     Nick,
     Notice,
     Part,
@@ -25,6 +35,18 @@ pub enum Verb {
     Whois,
 }
 
+/// The commands Textual runs in its KICK case (`IRCClient.m:3738-3832`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KickBan {
+    Kick,
+    Ban,
+    Unban,
+    Quiet,
+    Unquiet,
+    /// Ban, then kick: `/kickban` and `/kb`.
+    KickBan,
+}
+
 pub struct Spec {
     pub name: &'static str,
     pub verb: Verb,
@@ -33,33 +55,56 @@ pub struct Spec {
     pub usage: &'static str,
 }
 
-/// Sorted by name. Aliases are Textual's (`j`, `leave`, `m`, `t`, `quote`,
-/// `remove`).
+/// Sorted by name. Aliases are Textual's (`j`, `kb`, `leave`, `m`, `t`,
+/// `quote`, `remove`).
 pub const COMMANDS: &[Spec] = &[
     spec("away", Verb::Away, "[comment]"),
+    spec("ban", Verb::Kick(KickBan::Ban), NICK),
     spec("close", Verb::Close, "[target]"),
     spec("conn", Verb::Conn, "[server]"),
+    spec("ctcp", Verb::Ctcp { reply: false }, CTCP),
+    spec("ctcpreply", Verb::Ctcp { reply: true }, CTCP),
+    spec("dehalfop", member('h', false), NICK),
+    spec("deop", member('o', false), NICK),
+    spec("devoice", member('v', false), NICK),
+    spec("halfop", member('h', true), NICK),
     spec("invite", Verb::Invite, "<nickname> [channel]"),
     spec("j", Verb::Join, "<channel[,channel]]> [key[,key]]"),
     spec("join", Verb::Join, "<channel[,channel]]> [key[,key]]"),
-    spec("kick", Verb::Kick, "[channel] <nickname> [comment]"),
+    spec("kb", Verb::Kick(KickBan::KickBan), KICK),
+    spec("kick", Verb::Kick(KickBan::Kick), KICK),
+    spec("kickban", Verb::Kick(KickBan::KickBan), KICK),
     spec("leave", Verb::Part, "[comment]"),
     spec("m", Verb::Mode, "<target> [flags] [arguments]"),
     spec("me", Verb::Me, "<message>"),
     spec("mode", Verb::Mode, "<target> [flags] [arguments]"),
     spec("msg", Verb::Msg, "<target[,target]]> <message>"),
+    spec("names", Verb::Names, "<channel>"),
     spec("nick", Verb::Nick, "<nickname>"),
     spec("notice", Verb::Notice, "<target[,target]]> <message>"),
+    spec("op", member('o', true), NICK),
     spec("part", Verb::Part, "[comment]"),
     spec("query", Verb::Query, "<nickname>"),
+    spec("quiet", Verb::Kick(KickBan::Quiet), NICK),
     spec("quit", Verb::Quit, "[comment]"),
     spec("quote", Verb::Raw, "<input>"),
     spec("raw", Verb::Raw, "<input>"),
     spec("remove", Verb::Close, "[target]"),
     spec("t", Verb::Topic, "<channel> [topic]"),
     spec("topic", Verb::Topic, "<channel> [topic]"),
+    spec("unban", Verb::Kick(KickBan::Unban), NICK),
+    spec("unquiet", Verb::Kick(KickBan::Unquiet), NICK),
+    spec("voice", member('v', true), NICK),
     spec("whois", Verb::Whois, "<nickname>"),
 ];
+
+const NICK: &str = "[channel] <nickname>";
+const KICK: &str = "[channel] <nickname> [comment]";
+const CTCP: &str = "<nickname> <command> [extra]";
+
+const fn member(mode: char, set: bool) -> Verb {
+    Verb::Member { mode, set }
+}
 
 const fn spec(name: &'static str, verb: Verb, usage: &'static str) -> Spec {
     Spec { name, verb, usage }
@@ -147,7 +192,7 @@ mod tests {
         assert_eq!(names, sorted);
         assert_eq!(find("J").map(|s| s.verb), Some(Verb::Join));
         assert_eq!(find("Quote").map(|s| s.verb), Some(Verb::Raw));
-        assert!(find("names").is_none());
+        assert!(find("connect").is_none());
     }
 
     #[test]

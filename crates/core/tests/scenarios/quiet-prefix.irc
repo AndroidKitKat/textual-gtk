@@ -1,0 +1,13 @@
+# A server that uses q as a member prefix (owner, ~) has no quiet list:
+# Textual refuses /quiet and /unquiet there rather than set the prefix.
+! welcome
+< :irc.test 005 textual CHANTYPES=# PREFIX=(qov)~@+ :are supported by this server
+< :textual!u@h JOIN #c
+> MODE #c
+! type #c /quiet dave
+? line #c The mode +q is not supported on this server
+! type #c /unquiet dave
+? line #c The mode +q is not supported on this server
+! type #c /ban dave
+> MODE #c +b dave
+? registered textual

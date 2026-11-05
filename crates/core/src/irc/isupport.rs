@@ -9,6 +9,8 @@ use super::casemap::CaseMapping;
 const DEFAULT_PREFIX: &[(char, char)] = &[('o', '@'), ('v', '+')];
 const DEFAULT_CHANTYPES: &str = "#&";
 const DEFAULT_CHANMODES: [&str; 4] = ["beI", "k", "l", "imnpst"];
+/// `TXMaximumNodesPerModeCommand`.
+const DEFAULT_MODES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Isupport {
@@ -18,6 +20,10 @@ pub struct Isupport {
     pub whox: bool,
     /// The MONITOR limit, if the server supports MONITOR.
     pub monitor: Option<usize>,
+    /// How many parameter modes one MODE may carry.
+    pub modes: usize,
+    pub kicklen: Option<usize>,
+    pub topiclen: Option<usize>,
     /// (mode, symbol) pairs, highest rank first.
     prefix: Vec<(char, char)>,
     /// CHANMODES groups A (list), B (always a parameter), C (parameter when
@@ -35,6 +41,9 @@ impl Default for Isupport {
             nicklen: None,
             whox: false,
             monitor: None,
+            modes: DEFAULT_MODES,
+            kicklen: None,
+            topiclen: None,
             prefix: DEFAULT_PREFIX.to_vec(),
             chanmodes: DEFAULT_CHANMODES.map(str::to_owned),
             chantypes: DEFAULT_CHANTYPES.to_owned(),
@@ -68,6 +77,10 @@ impl Isupport {
                 "MONITOR" if value.is_empty() => self.monitor = Some(usize::MAX),
                 "MONITOR" => keep_if_unparsable(&mut self.monitor, &value),
                 "PREFIX" => self.prefix = parse_prefix(&value),
+                // Textual keeps its value unless the new one is positive.
+                "MODES" => self.modes = positive(&value).unwrap_or(self.modes),
+                "KICKLEN" => self.kicklen = positive(&value).or(self.kicklen),
+                "TOPICLEN" => self.topiclen = positive(&value).or(self.topiclen),
                 "CHANMODES" => {
                     let mut groups = value.split(',').map(str::to_owned);
                     for slot in &mut self.chanmodes {
@@ -89,6 +102,9 @@ impl Isupport {
             "WHOX" => self.whox = false,
             "MONITOR" => self.monitor = None,
             "PREFIX" => self.prefix = defaults.prefix.clone(),
+            "MODES" => self.modes = DEFAULT_MODES,
+            "KICKLEN" => self.kicklen = None,
+            "TOPICLEN" => self.topiclen = None,
             "CHANMODES" => self.chanmodes = defaults.chanmodes.clone(),
             "CHANTYPES" => self.chantypes = defaults.chantypes.clone(),
             "STATUSMSG" => self.statusmsg = String::new(),
@@ -180,6 +196,10 @@ fn parse_prefix(value: &str) -> Vec<(char, char)> {
 
 /// A value that does not parse leaves the previous one, so a garbled line
 /// cannot clear a limit or turn it into "unlimited".
+fn positive(value: &str) -> Option<usize> {
+    value.parse().ok().filter(|n| *n > 0)
+}
+
 fn keep_if_unparsable(slot: &mut Option<usize>, value: &str) {
     if let Ok(parsed) = value.parse() {
         *slot = Some(parsed);

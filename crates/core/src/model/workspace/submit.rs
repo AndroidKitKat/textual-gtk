@@ -5,7 +5,9 @@
 
 use std::ops::Range;
 
-use crate::input::commands::{self, COMMANDS, Spec, Typed, Verb, classify, split_lines, token};
+use crate::input::commands::{
+    self, COMMANDS, KickBan, Spec, Typed, Verb, classify, split_lines, token,
+};
 use crate::input::completion::{self, Source};
 use crate::irc::isupport::Isupport;
 use crate::irc::{Message, WireLine};
@@ -230,7 +232,14 @@ impl Run<'_, '_, '_> {
             Verb::Quit if connected => self.disconnect(args),
             Verb::Topic if logged_in => self.topic(args),
             Verb::Mode if logged_in => self.mode(spec, args),
-            Verb::Kick if logged_in => self.kick(spec, args),
+            Verb::Kick(what) if logged_in => self.kick_ban(spec, args, what),
+            Verb::Member { mode, set } if logged_in => self.member_mode(spec, args, mode, set),
+            Verb::Ctcp { reply } if logged_in => self.ctcp(spec, args, reply),
+            Verb::Names if logged_in => match args {
+                "" => self.invalid(spec),
+                // MODE-like: Textual adds no colon (`outgoingColonIndex` 999).
+                names => self.raw(&format!("NAMES {names}")),
+            },
             Verb::Invite if logged_in => self.invite(spec, args),
             Verb::Whois if logged_in => self.whois(spec, args),
             Verb::Away if logged_in => {
@@ -508,9 +517,19 @@ impl Run<'_, '_, '_> {
         };
         if topic.is_empty() {
             self.send("TOPIC", &[&channel]);
-        } else {
-            self.send("TOPIC", &[&channel, topic]);
+            return;
         }
+        if let Some(max) = self.isupport().topiclen
+            && topic.encode_utf16().count() > max
+        {
+            let text = format!(
+                "You have exceeded the maximum topic length for {} which is {max} characters. \
+                 The end of your topic may have been cut off.",
+                self.network_name()
+            );
+            self.print(&text);
+        }
+        self.send("TOPIC", &[&channel, topic]);
     }
 
     /// `/mode [target] [modes]`: modes alone apply to the channel it was
@@ -534,31 +553,154 @@ impl Run<'_, '_, '_> {
         self.send("MODE", &params);
     }
 
-    /// `/kick [#chan] nick [comment]`.
-    fn kick(&mut self, spec: &Spec, args: &str) {
+    /// The channel a command names first, or the one it was typed in, and
+    /// what follows. `None` after saying "only with a channel".
+    fn channel_and_rest<'s>(&mut self, args: &'s str) -> Option<(String, &'s str)> {
         let (first, rest) = token(args);
-        let (channel, nick, reason) = if self.is_channel(first) {
-            let (nick, reason) = token(rest);
-            (first.to_owned(), nick, reason)
-        } else {
-            match self.channel_here() {
-                Some(name) => (name, first, rest),
-                None => {
-                    self.print(CHANNEL_ONLY);
-                    return;
-                }
-            }
+        if self.is_channel(first) {
+            return Some((first.to_owned(), rest));
+        }
+        let here = self.channel_here();
+        if here.is_none() {
+            self.print(CHANNEL_ONLY);
+        }
+        here.map(|name| (name, args))
+    }
+
+    /// `/kick`, `/ban`, `/unban`, `/quiet`, `/unquiet`, `/kickban` and `/kb`
+    /// with `[#chan] nick [comment]` (`IRCClient.m:3738-3832`). A ban names
+    /// the member's mask when they are in the channel, the nick otherwise.
+    fn kick_ban(&mut self, spec: &Spec, args: &str, what: KickBan) {
+        let Some((channel, rest)) = self.channel_and_rest(args) else {
+            return;
         };
+        let (nick, reason) = token(rest);
         if nick.is_empty() {
             self.invalid(spec);
             return;
         }
-        let reason = if reason.is_empty() {
-            KICK_REASON
-        } else {
-            reason
+        let ban = match what {
+            KickBan::Kick => None,
+            KickBan::Ban | KickBan::KickBan => Some(('+', 'b')),
+            KickBan::Unban => Some(('-', 'b')),
+            KickBan::Quiet => Some(('+', 'q')),
+            KickBan::Unquiet => Some(('-', 'q')),
         };
-        self.send("KICK", &[&channel, nick, reason]);
+        if let Some((sign, mode)) = ban {
+            if self.isupport().symbol_of_mode(mode).is_some() {
+                self.print(&not_supported(mode));
+                return;
+            }
+            let mask = self.ban_mask(&channel, nick);
+            self.send("MODE", &[&channel, &format!("{sign}{mode}"), &mask]);
+        }
+        if matches!(what, KickBan::Kick | KickBan::KickBan) {
+            let reason = if reason.is_empty() {
+                KICK_REASON
+            } else {
+                reason
+            };
+            if let Some(max) = self.isupport().kicklen
+                && reason.encode_utf16().count() > max
+            {
+                let text = format!(
+                    "You have exceeded the maximum kick message length for {} which is {max} \
+                     characters. The end of your kick message may have been cut off.",
+                    self.network_name()
+                );
+                self.print(&text);
+            }
+            self.send("KICK", &[&channel, nick, reason]);
+        }
+    }
+
+    /// Textual's `banMask` in its default format (`*!user@host`), or
+    /// `nick!*@*` for a member whose address is unknown, or the nick as
+    /// typed for someone not in the channel.
+    fn ban_mask(&self, channel: &str, nick: &str) -> String {
+        let casemap = self.net.casemap();
+        let member = self
+            .net
+            .buffers()
+            .find_channel(casemap, channel)
+            .and_then(|id| self.net.buffers().get(id))
+            .and_then(|b| b.joined())
+            .and_then(|j| j.members().get(&casemap.nick(nick)).cloned());
+        match member {
+            Some(m) => match (m.user, m.host) {
+                (Some(user), Some(host)) => format!("*!{user}@{host}"),
+                _ => format!("{}!*@*", m.nick),
+            },
+            None => nick.to_owned(),
+        }
+    }
+
+    /// `/op`, `/deop`, `/halfop`, `/dehalfop`, `/voice`, `/devoice` with
+    /// `[#chan] nick...` (`IRCClient.m:3282-3340`): as many nicks per MODE
+    /// as the server's MODES allows.
+    fn member_mode(&mut self, spec: &Spec, args: &str, mode: char, set: bool) {
+        if self.isupport().symbol_of_mode(mode).is_none() {
+            self.print(&not_supported(mode));
+            return;
+        }
+        let Some((channel, nicks)) = self.channel_and_rest(args) else {
+            return;
+        };
+        let nicks: Vec<&str> = nicks.split_whitespace().collect();
+        if nicks.is_empty() {
+            self.invalid(spec);
+            return;
+        }
+        let sign = if set { '+' } else { '-' };
+        for chunk in nicks.chunks(self.isupport().modes) {
+            let modes: String = std::iter::once(sign)
+                .chain(std::iter::repeat_n(mode, chunk.len()))
+                .collect();
+            let mut params = vec![channel.as_str(), &modes];
+            params.extend(chunk);
+            self.send("MODE", &params);
+        }
+    }
+
+    /// `/ctcp nick command [extra]` and `/ctcpreply` (`IRCClient.m:3227-3262`).
+    /// `PING` carries the time, as Textual's `sendCTCPPing:`.
+    fn ctcp(&mut self, spec: &Spec, args: &str, reply: bool) {
+        let (target, rest) = token(args);
+        let (command, extra) = token(rest);
+        if command.is_empty() {
+            self.invalid(spec);
+            return;
+        }
+        let command = command.to_uppercase();
+        let ping;
+        let extra = if !reply && command == "PING" {
+            let micros = self.cx.now.wall.timestamp_micros();
+            ping = format!(
+                "{}.{:06}",
+                micros.div_euclid(1_000_000),
+                micros.rem_euclid(1_000_000)
+            );
+            ping.as_str()
+        } else {
+            extra
+        };
+        // Textual writes `command + " " + extra` even for an empty extra;
+        // the stray space before the closing \x01 is left out here.
+        let body = if extra.is_empty() {
+            format!("\x01{command}\x01")
+        } else {
+            format!("\x01{command} {extra}\x01")
+        };
+        let verb = if reply { "NOTICE" } else { "PRIVMSG" };
+        self.send(verb, &[target, &body]);
+    }
+
+    /// Textual's `networkNameAlt`: the network's name, or the server's.
+    fn network_name(&self) -> String {
+        self.net
+            .session()
+            .and_then(|s| s.isupport().network.clone())
+            .unwrap_or_else(|| self.net.config().name.clone())
     }
 
     /// `/invite nick... [#chan]`: one INVITE per nick.
@@ -644,4 +786,9 @@ fn is_internet_address(host: &str) -> bool {
         || host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// Textual's `IRC[dwi-d1]`, which names the mode with `+` either way.
+fn not_supported(mode: char) -> String {
+    format!("The mode \x02+{mode}\x02 is not supported on this server")
 }
