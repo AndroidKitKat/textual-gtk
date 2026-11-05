@@ -21,7 +21,7 @@ fi
 # Setting a widget's class list replaces the classes GTK and libadwaita
 # put there (a window's `background`, a box's `horizontal`), which left the
 # header bar transparent once. Add classes one by one instead.
-if replaced=$(grep -rnE '\.css_classes\(\[|set_css_classes|"css-classes"' src/); then
+if replaced=$(grep -rnE '\.css_classes\([^)]|set_css_classes|"css-classes"' src/); then
   echo "$replaced" >&2
   echo "use add_css_class, or Bound::classes for a row's classes, instead of replacing the class list" >&2
   exit 1

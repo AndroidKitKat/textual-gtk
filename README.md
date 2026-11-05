@@ -23,6 +23,7 @@ scripts/check.sh            # fmt, clippy, unit and integration tests
 scripts/test-server.sh      # local Ergo on 127.0.0.1:6667/6697, limits lifted for tests
 cargo test --test transport -- --ignored    # the model and transport against the real server
 python3 scripts/e2e.py      # the app under Xvfb on two networks and a fake server: sidebar, members, badges, reload, quit
+scripts/headless.sh target/debug/textual-gtk --network ...   # any manual GUI run, on a private X server
 ```
 
 ## License
