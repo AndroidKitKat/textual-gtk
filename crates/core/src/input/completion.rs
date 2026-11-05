@@ -5,8 +5,6 @@
 
 use std::ops::Range;
 
-use crate::irc::casemap::CaseMapping;
-
 /// Names Textual offers after the members of a channel (`performCompletion_step1`).
 const STATIC_NAMES: [&str; 7] = [
     "NickServ", "RootServ", "OperServ", "HostServ", "ChanServ", "MemoServ", "Textual",
@@ -43,7 +41,6 @@ pub struct Source {
     /// The focused channel or query first, then the network's others.
     pub channels: Vec<String>,
     pub network: Option<String>,
-    pub casemap: CaseMapping,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,22 +178,22 @@ impl Scan {
         if empty && self.kind != Kind::Nick {
             return None;
         }
-        let casemap = source.casemap;
-        let fold = |s: &str| match self.kind {
-            Kind::Command => s.to_lowercase(),
-            Kind::Channel => casemap.chan(&s.to_lowercase()).as_str().to_owned(),
-            Kind::Nick => casemap.nick(&s.to_lowercase()).as_str().to_owned(),
-        };
-        // (shown, matched against)
+        // (shown, matched against). Textual compares `lowercaseString`s,
+        // whatever the server's casemap.
         let mut choices: Vec<(String, String)> = Vec::new();
         match self.kind {
             Kind::Command => {
                 let mut names = source.commands.clone();
                 names.sort();
-                choices.extend(names.into_iter().map(|n| (n.clone(), fold(&n))));
+                choices.extend(names.into_iter().map(|n| (n.clone(), n.to_lowercase())));
             }
             Kind::Channel => {
-                choices.extend(source.channels.iter().map(|c| (c.clone(), fold(c))));
+                choices.extend(
+                    source
+                        .channels
+                        .iter()
+                        .map(|c| (c.clone(), c.to_lowercase())),
+                );
             }
             Kind::Nick => {
                 let mut list = members()?;
@@ -216,18 +213,18 @@ impl Scan {
                     list.insert(0, m);
                 }
                 for m in &list {
-                    add_nick(&mut choices, &m.nick, !empty, &fold);
+                    add_nick(&mut choices, &m.nick, !empty);
                 }
                 for name in STATIC_NAMES
                     .iter()
                     .copied()
                     .chain(source.network.as_deref())
                 {
-                    add_nick(&mut choices, name, false, &fold);
+                    add_nick(&mut choices, name, false);
                 }
             }
         }
-        let pattern = fold(&self.pattern);
+        let pattern = self.pattern.to_lowercase();
         let matched: Vec<&String> = choices
             .iter()
             .filter(|(_, key)| empty || key.starts_with(&pattern))
@@ -329,19 +326,14 @@ fn suffix_after(chars: &[char], caret: usize, kind: Kind, settings: &Settings) -
 
 /// Textual's `addNickname`: the nick, and with `trimmed` also its spelling
 /// without leading `^[]-_`{}\`, unless that spelling is already offered.
-fn add_nick(
-    choices: &mut Vec<(String, String)>,
-    nick: &str,
-    trimmed: bool,
-    fold: &dyn Fn(&str) -> String,
-) {
-    choices.push((nick.to_owned(), fold(nick)));
+fn add_nick(choices: &mut Vec<(String, String)>, nick: &str, trimmed: bool) {
+    choices.push((nick.to_owned(), nick.to_lowercase()));
     if !trimmed {
         return;
     }
     let short = nick.trim_start_matches(TRIMMED);
     if !short.is_empty() && short != nick {
-        let key = fold(short);
+        let key = short.to_lowercase();
         if !choices.iter().any(|(_, k)| *k == key) {
             choices.push((nick.to_owned(), key));
         }
@@ -361,7 +353,6 @@ mod tests {
                 .map(String::from)
                 .to_vec(),
             network: Some("ErgoTest".into()),
-            casemap: CaseMapping::Rfc1459,
         }
     }
 
@@ -416,9 +407,11 @@ mod tests {
     }
 
     #[test]
-    fn the_scan_stops_at_a_comma_and_matching_follows_the_casemap() {
+    fn the_scan_stops_at_a_comma_and_matching_only_lowercases() {
         assert_eq!(one("x,AL|", &[("alice", 0.0)]), "x,alice |");
-        assert_eq!(one("{fo|", &[("[foo]", 0.0)]), "[foo] |");
+        // Textual compares `lowercaseString`s, not the server's casemap.
+        assert_eq!(one("{fo|", &[("[foo]", 0.0)]), "none");
+        assert_eq!(one("[fo|", &[("[foo]", 0.0)]), "[foo] |");
     }
 
     #[test]

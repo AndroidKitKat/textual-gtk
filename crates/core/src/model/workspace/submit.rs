@@ -156,7 +156,6 @@ impl Workspace {
             commands: COMMANDS.iter().map(|s| s.name.to_owned()).collect(),
             channels,
             network: net.session().and_then(|s| s.isupport().network.clone()),
-            casemap,
         };
         let members = || -> Option<Vec<completion::Member>> {
             let weighed = match kind? {
