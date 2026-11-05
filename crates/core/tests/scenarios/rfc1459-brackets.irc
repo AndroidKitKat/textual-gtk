@@ -1,0 +1,30 @@
+# Until 005 says otherwise the casemap is rfc1459, where nick[] and nick{}
+# are one user (Textual folds Unicode case and treats them as two).
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+< :irc.test 353 textual = #c :textual nick[]
+< :irc.test 366 textual #c :End of NAMES list
+> WHO #c
+< :irc.test 315 textual #c :End of WHO list
+< :nick{}!n@h PRIVMSG textual :one
+? buffers = console #c nick{}
+< :NICK[]!n@h PRIVMSG textual :two
+? buffers = console #c nick{}
+? lines nick{} 2
+< :Nick[]!n@h QUIT :bye
+? members #c = textual
+? line nick{} Nick[] (n@h) left IRC (bye)
+# A self JOIN under another spelling is the channel we are in.
+< :TEXTUAL!u@h JOIN #C
+? buffers = console #c nick{}
+# Under ascii, [] and {} are different users; the list is re-keyed.
+< :irc.test 005 textual CASEMAPPING=ascii :are supported by this server
+? casemap ascii
+< :x[]!x@h JOIN #c
+< :x{}!x@h JOIN #c
+? members #c = textual x[] x{}
+# Letters still fold: X{} is x{}.
+< :X{}!x@h PART #c
+? members #c = textual x[]
+? registered textual

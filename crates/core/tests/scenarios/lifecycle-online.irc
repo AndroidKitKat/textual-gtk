@@ -23,6 +23,7 @@
 ? casemap ascii
 ? network TestNet
 < :textual!~u@host.test JOIN #a
+> MODE #a
 ? hostmask ~u@host.test
 # Under ascii, TEXTUAL is us.
 < :TEXTUAL!~u@host.test NICK :renamed

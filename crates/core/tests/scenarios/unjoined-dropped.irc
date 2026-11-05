@@ -1,0 +1,16 @@
+# Lines for a channel we are not in are dropped and create no buffer;
+# server errors about it go to the console.
+! welcome
+< :irc.test 005 textual CHANTYPES=# :are supported by this server
+? lines console 3
+< :bob!b@h PRIVMSG #nojoin :x
+< :bob!b@h JOIN #nojoin
+< :bob!b@h MODE #nojoin +o x
+< :bob!b@h TOPIC #nojoin :t
+< :bob!b@h PART #nojoin
+< :irc.test 332 textual #nojoin :t
+? buffers = console
+? lines console 3
+< :irc.test 403 textual #nojoin :No such channel
+? line console Message(403): #nojoin No such channel
+? registered textual

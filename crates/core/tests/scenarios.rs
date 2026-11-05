@@ -11,7 +11,7 @@ fn every_scenario_transcript_passes() {
         .filter(|p| p.extension().is_some_and(|e| e == "irc"))
         .collect();
     paths.sort();
-    assert!(paths.len() >= 29, "scenarios went missing: {paths:?}");
+    assert!(paths.len() >= 46, "scenarios went missing: {paths:?}");
 
     let mut failures = String::new();
     for path in &paths {

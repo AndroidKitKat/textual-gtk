@@ -1,0 +1,28 @@
+# A private message opens a query; our own echoed message opens the
+# target's. A user's notice goes to its query if there is one, else to the
+# console. Queries stay below channels in the sidebar.
+! welcome echo-message
+< :irc.test 005 textual CHANTYPES=# :are supported by this server
+< :dave!d@h PRIVMSG textual :pm one
+? buffers = console dave
+? line dave <dave> pm one
+< :textual!u@h PRIVMSG carol :hi carol
+? buffers = console dave carol
+? line carol <textual> hi carol
+< :erin!e@h NOTICE textual :psst
+? buffers = console dave carol
+? line console -erin- psst
+< :dave!d@h NOTICE textual :notice dave
+? line dave -dave- notice dave
+< :textual!u@h JOIN #x
+> MODE #x
+? buffers = console #x dave carol
+< :irc.test NOTICE textual :server says
+? line console -irc.test- server says
+# A NICK renames the query, unless one with the new nick is open.
+< :dave!d@h NICK carol
+? buffers = console #x dave carol
+< :dave!d@h NICK david
+? buffers = console #x david carol
+? line david dave is now known as david
+? registered textual

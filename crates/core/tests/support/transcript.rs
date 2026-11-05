@@ -1,45 +1,80 @@
-//! The transcript runner: drives one `Network` through a `.irc` script in
-//! virtual time.
+//! The transcript runner: drives a `Workspace` holding one network through
+//! a `.irc` script in virtual time.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use chrono::{Local, TimeZone};
 use textual_core::irc::Message;
 use textual_core::irc::caps::WANTED;
 use textual_core::irc::casemap::CaseMapping;
+use textual_core::line::{CLIENT_COMMAND, Line};
+use textual_core::model::buffer::{Buffer, BufferId};
+use textual_core::model::members::{MemberDiff, MemberRow};
 use textual_core::model::network::{
-    Address, CloseReason, ConnId, Effect, Ended, Input, Link, Network, Notice, ServerConfig,
-    ServerId, Tls, TransportEvent,
+    self, Address, CloseReason, ConnId, Effect, Ended, Link, Network, ServerConfig, ServerId, Tls,
+    TransportEvent,
 };
 use textual_core::model::registration::Auth;
+use textual_core::model::workspace::{Input, Out, UiAction, Workspace};
+use textual_core::model::{Change, Now};
 use textual_core::secret::Secret;
 
 use super::setup;
 
 pub struct Driver {
-    net: Network,
+    ws: Workspace,
+    server: ServerId,
+    start: Instant,
     now: Instant,
     latest: Option<ConnId>,
     sent: VecDeque<String>,
-    notices: VecDeque<Notice>,
+    notices: VecDeque<String>,
+    view: View,
+    /// Where the view built from changes disagreed with the workspace.
+    drift: Vec<String>,
 }
 
 impl Driver {
     pub fn new(config: ServerConfig) -> Self {
-        Driver {
-            net: Network::new(config),
-            now: Instant::now(),
+        let server = config.id;
+        let start = Instant::now();
+        let mut driver = Driver {
+            ws: Workspace::new(),
+            server,
+            start,
+            now: start,
             latest: None,
             sent: VecDeque::new(),
             notices: VecDeque::new(),
+            view: View::default(),
+            drift: Vec::new(),
+        };
+        let mut out = Out::default();
+        driver.ws.add_network(config, &mut out);
+        driver.take(out);
+        driver
+    }
+
+    fn now(&self) -> Now {
+        // A fixed wall clock, so a script's lines are the same in every run.
+        let wall = Local.timestamp_opt(1_800_000_000, 0).unwrap() + (self.now - self.start);
+        Now {
+            mono: self.now,
+            wall,
         }
     }
 
     pub fn input(&mut self, input: Input) {
-        let mut out = Vec::new();
-        self.net.update(input, self.now, &mut out);
-        for effect in out {
+        let mut out = Out::default();
+        self.ws.update(input, self.now(), &mut out);
+        self.take(out);
+    }
+
+    fn take(&mut self, out: Out) {
+        for (_, effect) in out.effects {
             let item = match effect {
                 Effect::Dial { conn, address, tls } => {
                     self.latest = Some(conn);
@@ -59,17 +94,32 @@ impl Driver {
                     }
                 }
                 Effect::Hangup { conn } => format!("hangup {conn}"),
-                Effect::Notice(notice) => {
-                    self.notices.push_back(notice);
-                    continue;
-                }
             };
             self.sent.push_back(item);
         }
+        let console = self.network().buffers().console().id();
+        for change in &out.changes {
+            if let Change::Line { buffer, line } = change
+                && *buffer == console
+                && line.command == CLIENT_COMMAND
+            {
+                self.notices.push_back(line.plain_text());
+            }
+        }
+        if let Err(e) = self.view.apply(&self.ws, &out.changes) {
+            self.drift.push(e);
+        }
+    }
+
+    fn net(&mut self, input: network::Input) {
+        self.input(Input::Network {
+            server: self.server,
+            input,
+        });
     }
 
     pub fn transport(&mut self, conn: ConnId, event: TransportEvent) {
-        self.input(Input::Transport { conn, event });
+        self.net(network::Input::Transport { conn, event });
     }
 
     pub fn advance(&mut self, by: Duration) {
@@ -78,7 +128,143 @@ impl Driver {
     }
 
     pub fn network(&self) -> &Network {
-        &self.net
+        self.ws.network(self.server).expect("the one network")
+    }
+
+    fn buffer(&self, name: &str) -> Result<&Buffer, String> {
+        let buffers = self.network().buffers();
+        if name == "console" {
+            return Ok(buffers.console());
+        }
+        buffers
+            .iter()
+            .find(|b| !b.is_console() && b.name() == name)
+            .ok_or_else(|| format!("no buffer {name:?}"))
+    }
+
+    fn label(&self, id: BufferId) -> String {
+        match self.ws.buffer(id) {
+            Some((_, b)) if b.is_console() => "console".to_owned(),
+            Some((_, b)) => b.name().to_owned(),
+            None => format!("{id}"),
+        }
+    }
+}
+
+/// What a view built only from `Change`s would show, following the
+/// design's rule: a buffer whose member list is reset in a pass is rebuilt
+/// from the final state and ignores that pass's other diffs.
+#[derive(Default)]
+struct View {
+    buffers: HashSet<BufferId>,
+    members: HashMap<BufferId, Vec<MemberRow>>,
+    lines: HashMap<BufferId, Vec<Rc<Line>>>,
+}
+
+fn rows(ws: &Workspace, id: BufferId) -> Vec<MemberRow> {
+    let Some((net, buffer)) = ws.buffer(id) else {
+        return Vec::new();
+    };
+    let prefix = net
+        .session()
+        .map_or_else(Vec::new, |s| s.isupport().prefix().to_vec());
+    buffer
+        .joined()
+        .map_or_else(Vec::new, |j| j.members().rows(&prefix).collect())
+}
+
+impl View {
+    fn apply(&mut self, ws: &Workspace, changes: &[Change]) -> Result<(), String> {
+        let reset: HashSet<BufferId> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::Members {
+                    buffer,
+                    diff: MemberDiff::Reset,
+                } => Some(*buffer),
+                _ => None,
+            })
+            .collect();
+        for id in &reset {
+            self.members.insert(*id, rows(ws, *id));
+        }
+        for change in changes {
+            match change {
+                Change::BufferAdded(id) => {
+                    if !self.buffers.insert(*id) {
+                        return Err(format!("{id} added twice"));
+                    }
+                }
+                Change::BufferRemoved(id) => {
+                    self.buffers.remove(id);
+                    self.members.remove(id);
+                    self.lines.remove(id);
+                }
+                Change::Line { buffer, line } => {
+                    self.lines.entry(*buffer).or_default().push(line.clone());
+                }
+                Change::Members { buffer, diff } if !reset.contains(buffer) => {
+                    let list = self.members.entry(*buffer).or_default();
+                    let fits = |at: usize, len: usize| at <= len;
+                    match diff {
+                        MemberDiff::Reset => unreachable!("handled above"),
+                        MemberDiff::Insert { at, row } if fits(*at, list.len()) => {
+                            list.insert(*at, row.clone());
+                        }
+                        MemberDiff::Remove { at } if *at < list.len() => {
+                            list.remove(*at);
+                        }
+                        MemberDiff::Update { at, row } if *at < list.len() => {
+                            list[*at] = row.clone();
+                        }
+                        MemberDiff::Move { from, to, row } if *from < list.len() => {
+                            list.remove(*from);
+                            if *to > list.len() {
+                                return Err(format!("{buffer}: {diff:?} out of range"));
+                            }
+                            list.insert(*to, row.clone());
+                        }
+                        _ => return Err(format!("{buffer}: {diff:?} out of range")),
+                    }
+                }
+                _ => {}
+            }
+        }
+        let actual: HashSet<BufferId> = ws
+            .networks()
+            .iter()
+            .flat_map(|n| n.buffers().iter().map(Buffer::id))
+            .collect();
+        if actual != self.buffers {
+            return Err(format!(
+                "buffers from changes {:?}, in the workspace {actual:?}",
+                self.buffers
+            ));
+        }
+        for id in actual {
+            let want = rows(ws, id);
+            let got = self.members.get(&id).cloned().unwrap_or_default();
+            if got != want {
+                return Err(format!(
+                    "{id} members from changes {got:?}, in the workspace {want:?}"
+                ));
+            }
+            let (_, buffer) = ws.buffer(id).expect("listed");
+            let lines = self.lines.get(&id).map_or(&[][..], Vec::as_slice);
+            let kept = buffer.scrollback().len();
+            let tail = &lines[lines.len().saturating_sub(kept)..];
+            let same = tail.len() == kept
+                && tail
+                    .iter()
+                    .zip(buffer.scrollback().lines())
+                    .all(|(a, b)| Rc::ptr_eq(a, b));
+            if !same {
+                return Err(format!(
+                    "{id} lines from changes differ from its scrollback"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -98,9 +284,16 @@ impl Driver {
 ///   `! closed eof|timeout|error <text>|bad-certificate <hex>`: a transport
 ///   event on the latest connection; `! #n <event>` sends it on connection n,
 ///   where `line <raw>` is also an event.
+/// - `! welcome [caps]`: connects and registers, acknowledging whichever of
+///   `caps` the client asks for, with nothing checked; for scripts about
+///   what happens after 001.
+/// - The window: `! focus <buffer>`, `! collapse`, `! expand`,
+///   `! window active|inactive`, `! close <buffer>`, `! say <buffer> text`.
+///   A buffer is `console`, a channel name or a query's nick.
 /// - `@ +5s`, `@ +4.613s`, `@ +250ms`: virtual time passes. `@ wake`: time
 ///   passes to the network's next wake.
-/// - `? notice text`: the next console notice, as displayed.
+/// - `? notice text`: the next line the client printed to the console
+///   itself, as plain text.
 /// - Link queries, which are also the end states (every transcript must end
 ///   with one, so a truncated one cannot pass): `? registering`,
 ///   `? connecting`, `? quitting`, `? registered nick [account]`,
@@ -109,9 +302,17 @@ impl Driver {
 /// - Other queries: `? next-wake <duration>|none`, `? failures n`,
 ///   `? desired online|offline`, `? nick x`, `? hostmask user@host`,
 ///   `? casemap ascii|rfc1459|rfc1459-strict`, `? network name`.
+/// - Buffer queries: `? buffers = console #a alice` (sidebar order),
+///   `? members #c = ~q @op +voice plain` (`(away)` after an away member),
+///   `? joined #c`, `? parted #c`, `? topic #c text|none`, `? modes #c +nt`,
+///   `? line <buffer> text` (the last line's plain text; a final `*`
+///   matches a prefix), `? lines <buffer> n`, `? unread <buffer> n
+///   highlights m`, `? focus <buffer>`, `? expanded yes|no`.
 /// - Without a `!` or `@` before the first `>` or `<`, the script starts
 ///   already connected: the connect, its notice and dial, and `opened` run
 ///   unchecked.
+/// - After every step, a view built only from the changes must match the
+///   workspace: buffers, member lists and lines.
 /// - `#` at the start of a line is a comment; blank lines are skipped.
 pub fn run_transcript(source: &str) -> Result<(), String> {
     let mut config = ServerConfig {
@@ -145,10 +346,10 @@ pub fn run_transcript(source: &str) -> Result<(), String> {
         let t = driver.get_or_insert_with(|| {
             let mut t = Driver::new(config.clone());
             if !matches!(kind, "!" | "@") {
-                t.input(Input::Connect);
+                t.net(network::Input::Connect);
                 t.transport(t.latest.expect("dialed"), TransportEvent::Opened);
                 t.sent.retain(|s| !s.starts_with("dial "));
-                t.notices.retain(|n| !matches!(n, Notice::Connecting(_)));
+                t.notices.retain(|n| !n.starts_with("Connecting to "));
             }
             t
         });
@@ -186,6 +387,9 @@ pub fn run_transcript(source: &str) -> Result<(), String> {
             _ => Err(format!("unknown line kind {kind:?}")),
         };
         result.map_err(|e| format!("{n}: {e}"))?;
+        for drift in t.drift.drain(..) {
+            writeln!(errors, "{n}: view drift: {drift}").unwrap();
+        }
     }
 
     if let Some(t) = &mut driver {
@@ -193,7 +397,7 @@ pub fn run_transcript(source: &str) -> Result<(), String> {
             writeln!(errors, "end: unexpected sent {extra:?}").unwrap();
         }
         while let Some(extra) = t.notices.pop_front() {
-            writeln!(errors, "end: unchecked notice {:?}", extra.to_string()).unwrap();
+            writeln!(errors, "end: unchecked notice {extra:?}").unwrap();
         }
     }
     if !ends_in_state {
@@ -253,6 +457,34 @@ fn parse_line(raw: &str) -> Result<Message, String> {
     Message::parse(raw).map_err(|e| format!("bad line {raw:?}: {e}"))
 }
 
+/// Connects and registers with nothing checked, acknowledging the caps
+/// the client requests among `offered`.
+fn welcome(t: &mut Driver, offered: &str) -> Result<(), String> {
+    t.net(network::Input::Connect);
+    let conn = t.latest.ok_or("no dial")?;
+    t.transport(conn, TransportEvent::Opened);
+    let offered = if offered.is_empty() {
+        "x-none"
+    } else {
+        offered
+    };
+    let ls = parse_line(&format!(":irc.test CAP * LS :{offered}"))?;
+    t.transport(conn, TransportEvent::Line(ls));
+    if let Some(req) = t.sent.iter().find_map(|s| s.strip_prefix("CAP REQ ")) {
+        let ack = format!(":irc.test CAP * ACK {req}");
+        t.transport(conn, TransportEvent::Line(parse_line(&ack)?));
+    }
+    let nick = t.network().config().setup.nick.clone();
+    let welcome = parse_line(&format!(":irc.test 001 {nick} :Welcome"))?;
+    t.transport(conn, TransportEvent::Line(welcome));
+    t.sent.clear();
+    t.notices.clear();
+    if !matches!(t.network().link(), Link::Online { .. }) {
+        return Err(format!("not registered: {:?}", t.network().link()));
+    }
+    Ok(())
+}
+
 fn event(t: &mut Driver, rest: &str) -> Result<(), String> {
     let (conn, rest) = match rest.strip_prefix('#') {
         Some(tail) => {
@@ -263,14 +495,55 @@ fn event(t: &mut Driver, rest: &str) -> Result<(), String> {
         None => (t.latest, rest),
     };
     let (what, arg) = rest.split_once(' ').unwrap_or((rest, ""));
+    let ui = |t: &mut Driver, action| t.input(Input::Ui(action));
     let event = match what {
         "connect" => {
-            t.input(Input::Connect);
+            t.net(network::Input::Connect);
             return Ok(());
         }
         "disconnect" => {
             let reason = (!arg.is_empty()).then(|| arg.to_owned());
-            t.input(Input::Disconnect { reason });
+            t.net(network::Input::Disconnect { reason });
+            return Ok(());
+        }
+        "welcome" => return welcome(t, arg),
+        "focus" => {
+            let id = t.buffer(arg)?.id();
+            ui(t, UiAction::Select(id));
+            return Ok(());
+        }
+        "close" => {
+            let id = t.buffer(arg)?.id();
+            ui(t, UiAction::Close(id));
+            return Ok(());
+        }
+        "say" => {
+            let (name, text) = arg.split_once(' ').ok_or("say <buffer> text")?;
+            let buffer = t.buffer(name)?.id();
+            t.input(Input::Say {
+                buffer,
+                text: text.to_owned(),
+            });
+            return Ok(());
+        }
+        "collapse" | "expand" => {
+            let server = t.server;
+            ui(
+                t,
+                UiAction::SetExpanded {
+                    server,
+                    expanded: what == "expand",
+                },
+            );
+            return Ok(());
+        }
+        "window" => {
+            let active = match arg {
+                "active" => true,
+                "inactive" => false,
+                _ => return Err(format!("window active|inactive, not {arg:?}")),
+            };
+            ui(t, UiAction::WindowActive(active));
             return Ok(());
         }
         "opened" => TransportEvent::Opened,
@@ -304,10 +577,9 @@ fn close_reason(arg: &str) -> Result<CloseReason, String> {
 
 fn time(t: &mut Driver, rest: &str) -> Result<(), String> {
     if rest == "wake" {
-        let at = t
-            .net
-            .next_wake()
-            .ok_or("`@ wake` with nothing to wake for")?;
+        let at =
+            t.ws.next_wake()
+                .ok_or("`@ wake` with nothing to wake for")?;
         let by = at.saturating_duration_since(t.now);
         t.advance(by);
         return Ok(());
@@ -380,17 +652,113 @@ fn last_ended(link: &Link) -> Option<&Ended> {
     }
 }
 
+fn show_rows(rows: &[MemberRow]) -> String {
+    rows.iter()
+        .map(|r| {
+            let symbol = r.prefix.map(|(_, s)| s.to_string()).unwrap_or_default();
+            let away = if r.away { "(away)" } else { "" };
+            format!("{symbol}{}{away}", r.nick)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Buffer queries: `None` when the query holds, else what was found.
+fn check_buffer_query(t: &Driver, what: &str, arg: &str) -> Option<String> {
+    let result: Result<Option<String>, String> = (|| {
+        Ok(match what {
+            "buffers" => {
+                let want = arg.strip_prefix("= ").unwrap_or(arg);
+                let got: Vec<String> = t
+                    .network()
+                    .buffers()
+                    .iter()
+                    .map(|b| t.label(b.id()))
+                    .collect();
+                let got = got.join(" ");
+                (got != want).then_some(got)
+            }
+            "members" => {
+                let (name, want) = arg.split_once(" =").ok_or("members #c = ...")?;
+                let b = t.buffer(name)?;
+                let got = show_rows(&rows(&t.ws, b.id()));
+                (got != want.trim()).then_some(got)
+            }
+            "joined" | "parted" => {
+                let b = t.buffer(arg)?;
+                let joined = b.joined().is_some();
+                (joined != (what == "joined"))
+                    .then(|| if joined { "joined" } else { "not joined" }.to_owned())
+            }
+            "topic" => {
+                let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+                let b = t.buffer(name)?;
+                let got = b.joined().and_then(|j| j.topic()).unwrap_or("none");
+                (got != want).then(|| got.to_owned())
+            }
+            "modes" => {
+                let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+                let b = t.buffer(name)?;
+                let got = b.joined().map(|j| j.modes()).unwrap_or_default();
+                (got != want).then_some(got)
+            }
+            "line" => {
+                let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+                let b = t.buffer(name)?;
+                let got = b.scrollback().last().map(|l| l.plain_text());
+                let holds = got
+                    .as_deref()
+                    .is_some_and(|g| match want.strip_suffix('*') {
+                        Some(prefix) => g.starts_with(prefix),
+                        None => g == want,
+                    });
+                (!holds).then(|| format!("{got:?}"))
+            }
+            "lines" => {
+                let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+                let b = t.buffer(name)?;
+                let got = b.scrollback().len().to_string();
+                (got != want).then_some(got)
+            }
+            "unread" => {
+                let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+                let c = t.buffer(name)?.counters();
+                let got = format!("{} highlights {}", c.unread, c.highlights);
+                (got != want).then_some(got)
+            }
+            "focus" => {
+                let got = t.ws.focus().map(|id| t.label(id));
+                let want = t.buffer(arg)?.id();
+                (t.ws.focus() != Some(want)).then(|| format!("{got:?}"))
+            }
+            "expanded" => {
+                let got = if t.ws.is_expanded(t.server) {
+                    "yes"
+                } else {
+                    "no"
+                };
+                (got != arg).then(|| got.to_owned())
+            }
+            _ => return Err(format!("unknown query {what:?}")),
+        })
+    })();
+    match result {
+        Ok(got) => got,
+        Err(e) => Some(e),
+    }
+}
+
 /// `None` when the query holds, else what was found instead.
 fn check_query(t: &mut Driver, query: &str) -> Option<String> {
     let (what, arg) = query.split_once(' ').unwrap_or((query, ""));
-    let net = &t.net;
+    let net = t.network();
     let link = net.link();
     let session = net.session();
     let holds = match what {
         "notice" => {
             return match t.notices.pop_front() {
-                Some(notice) if notice.to_string() == arg => None,
-                Some(notice) => Some(format!("notice {:?}", notice.to_string())),
+                Some(notice) if notice == arg => None,
+                Some(notice) => Some(format!("notice {notice:?}")),
                 None => Some("no notice".to_owned()),
             };
         }
@@ -432,7 +800,7 @@ fn check_query(t: &mut Driver, query: &str) -> Option<String> {
         "hostmask" => session.is_some_and(|s| s.hostmask() == Some(arg)),
         "casemap" => session.is_some_and(|s| Some(s.casemap()) == CaseMapping::from_token(arg)),
         "network" => session.is_some_and(|s| s.isupport().network.as_deref() == Some(arg)),
-        _ => return Some(format!("unknown query {what:?}")),
+        _ => return check_buffer_query(t, what, arg),
     };
     if holds {
         return None;

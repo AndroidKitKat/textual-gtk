@@ -1,0 +1,54 @@
+# QUIT and NICK print into every buffer the nick is in, worked out before
+# the nick is renamed or removed: here two channels and a query, not #c.
+! welcome
+< :irc.test 005 textual CHANTYPES=# :are supported by this server
+< :textual!u@h JOIN #a
+> MODE #a
+< :irc.test 353 textual = #a :textual bob
+< :irc.test 366 textual #a :End of NAMES list
+> WHO #a
+< :irc.test 315 textual #a :End of WHO list
+< :textual!u@h JOIN #b
+> MODE #b
+< :irc.test 353 textual = #b :textual bob carol
+< :irc.test 366 textual #b :End of NAMES list
+> WHO #b
+< :irc.test 315 textual #b :End of WHO list
+< :textual!u@h JOIN #c
+> MODE #c
+< :irc.test 353 textual = #c :textual carol
+< :irc.test 366 textual #c :End of NAMES list
+> WHO #c
+< :irc.test 315 textual #c :End of WHO list
+< :bob!b@h PRIVMSG textual :hi there
+? buffers = console #a #b #c bob
+? line bob <bob> hi there
+< :bob!b@h NICK robert
+? line #a bob is now known as robert
+? line #b bob is now known as robert
+? line robert bob is now known as robert
+? line #c textual (u@h) joined the channel
+? buffers = console #a #b #c robert
+? members #a = robert textual
+? members #b = carol robert textual
+< :robert!b@h QUIT :Quit: later
+? line #a robert (b@h) left IRC (Quit: later)
+? line #b robert (b@h) left IRC (Quit: later)
+? line robert robert (b@h) left IRC (Quit: later)
+? line #c textual (u@h) joined the channel
+? members #a = textual
+? members #b = carol textual
+< :carol!c@h PART #b :bye all
+? line #b carol (c@h) left the channel (bye all)
+? members #b = textual
+? members #c = carol textual
+< :dave!d@h JOIN #c
+? line #c dave (d@h) joined the channel
+? members #c = carol dave textual
+# Our own NICK prints in every channel and renames us.
+< :textual!u@h NICK tx
+? line #a You're now known as tx
+? line #c You're now known as tx
+? members #c = carol dave tx
+? nick tx
+? registered tx

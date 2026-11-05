@@ -1,0 +1,42 @@
+# The model owns selection and expansion. Collapsing the server of the
+# focused buffer focuses its console (the server row); focusing a buffer
+# under a collapsed server expands it. Closing the focused buffer focuses
+# the one above it.
+! welcome
+< :textual!u@h JOIN #a
+> MODE #a
+< :bob!b@h PRIVMSG textual :hi
+? buffers = console #a bob
+? expanded yes
+! focus #a
+! collapse
+? expanded no
+? focus console
+! collapse
+? expanded no
+! expand
+? expanded yes
+? focus console
+! collapse
+! focus bob
+? expanded yes
+? focus bob
+# With the console focused, a collapse leaves the focus alone.
+! focus console
+! collapse
+? focus console
+! expand
+! focus bob
+! close bob
+? buffers = console #a
+? focus #a
+# Closing a joined channel leaves it.
+! close #a
+> PART #a
+? buffers = console
+? focus console
+! close console
+? buffers = console
+< :textual!u@h PART #a
+? buffers = console
+? registered textual

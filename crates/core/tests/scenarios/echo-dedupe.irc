@@ -1,0 +1,26 @@
+# With echo-message, what we say is printed when the server echoes it, not
+# when it is sent. A message to our own nick arrives twice with one msgid
+# (Ergo: once as the echo, once as the delivery) and is printed once.
+! welcome echo-message message-tags
+< :irc.test 005 textual CHANTYPES=# :are supported by this server
+< :textual!u@h JOIN #c
+> MODE #c
+? lines #c 1
+! say #c hello there
+> PRIVMSG #c :hello there
+? lines #c 1
+< @msgid=8r5u6ujh76au8ver2dmrhdfhhe :textual!~u@5aftjv5fggq76.irc PRIVMSG #c :hello there
+? line #c <textual> hello there
+? lines #c 2
+< @msgid=satrfymjkrtf9ndecafkhnbh52;time=2026-11-05T17:48:47.704Z :textual!~u@5aftjv5fggq76.irc PRIVMSG textual :to self
+< @msgid=satrfymjkrtf9ndecafkhnbh52;time=2026-11-05T17:48:47.704Z :textual!~u@5aftjv5fggq76.irc PRIVMSG textual :to self
+? buffers = console #c textual
+? lines textual 1
+# The same msgid in another buffer is another delivery; no msgid, no
+# deduplication.
+< @msgid=satrfymjkrtf9ndecafkhnbh52 :bob!b@h PRIVMSG #c :to self
+? lines #c 3
+< :bob!b@h PRIVMSG #c :again
+< :bob!b@h PRIVMSG #c :again
+? lines #c 5
+? registered textual

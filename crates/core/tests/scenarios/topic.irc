@@ -1,0 +1,22 @@
+# The topic from 332 on join, who set it from 333, a change and a clear
+# with TOPIC, and 331 (Ergo's answer to TOPIC when none is set).
+! welcome
+< :irc.test 005 textual CHANTYPES=# :are supported by this server
+< :textual!~u@h JOIN #t2
+> MODE #t2
+< :irc.test 332 textual #t2 :hello world
+? topic #t2 hello world
+? line #t2 Topic is hello world
+< :irc.test 333 textual #t2 carol!~u@5aftjv5fggq76.irc 1793900949
+? line #t2 Set by carol on *
+< :carol!c@h TOPIC #t2 :new topic
+? topic #t2 new topic
+? line #t2 carol changed the topic to new topic
+< :carol!c@h TOPIC #t2 :
+? topic #t2 none
+? line #t2 carol changed the topic to*
+< :carol!c@h TOPIC #t2 :back
+< :irc.test 331 textual #t2 :No topic is set
+? topic #t2 none
+? line console #t2 No topic is set
+? registered textual

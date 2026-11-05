@@ -9,9 +9,13 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::irc::isupport::Isupport;
 use crate::irc::{Message, WireLine};
+use crate::line::{Destination, Line, LineType};
+use crate::model::buffer::{Body, BufferId, Buffers};
 use crate::model::registration::{self, Failure, Progress, Registration, Setup, SetupError};
 use crate::model::session::Session;
+use crate::model::{Change, Cx};
 
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(240);
 /// Textual's `_pingInterval` and `_timeoutInterval`: silence for this long
@@ -154,10 +158,16 @@ pub enum Effect {
     Hangup {
         conn: ConnId,
     },
-    Notice(Notice),
 }
 
-/// Something the console should say about the connection.
+/// What one input to a network produced.
+#[derive(Debug, Default)]
+pub(crate) struct Out {
+    pub effects: Vec<Effect>,
+    pub changes: Vec<Change>,
+}
+
+/// Something the console says about the connection.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notice {
     Connecting(Address),
@@ -306,11 +316,14 @@ pub struct Network {
     failures: u32,
     next_address: usize,
     next_conn: u64,
+    /// Outlive every link, so a reconnect finds its channels and queries.
+    buffers: Buffers,
 }
 
 impl Network {
-    pub fn new(config: ServerConfig) -> Self {
+    pub(crate) fn new(config: ServerConfig, console: BufferId) -> Self {
         assert!(!config.addresses.is_empty(), "a server needs an address");
+        let buffers = Buffers::new(console, &config.addresses[0].host);
         Network {
             config,
             desired: Desired::Offline,
@@ -318,7 +331,20 @@ impl Network {
             failures: 0,
             next_address: 0,
             next_conn: 1,
+            buffers,
         }
+    }
+
+    pub fn id(&self) -> ServerId {
+        self.config.id
+    }
+
+    pub fn buffers(&self) -> &Buffers {
+        &self.buffers
+    }
+
+    pub(crate) fn buffers_mut(&mut self) -> &mut Buffers {
+        &mut self.buffers
     }
 
     pub fn config(&self) -> &ServerConfig {
@@ -356,13 +382,13 @@ impl Network {
         }
     }
 
-    pub fn update(&mut self, input: Input, now: Instant, out: &mut Vec<Effect>) {
-        self.expire(now, out);
+    pub(crate) fn update(&mut self, input: Input, cx: &mut Cx, out: &mut Out) {
+        self.expire(cx, out);
         match input {
-            Input::Connect => self.connect(now, out),
-            Input::Disconnect { reason } => self.disconnect(reason, now, out),
+            Input::Connect => self.connect(cx, out),
+            Input::Disconnect { reason } => self.disconnect(reason, cx, out),
             Input::Transport { conn, event } if Some(conn) == self.conn() => {
-                self.on_transport(event, now, out);
+                self.on_transport(event, cx, out);
             }
             Input::Transport { .. } | Input::Wake => {}
         }
@@ -378,20 +404,20 @@ impl Network {
         }
     }
 
-    fn connect(&mut self, now: Instant, out: &mut Vec<Effect>) {
+    fn connect(&mut self, cx: &mut Cx, out: &mut Out) {
         self.desired = Desired::Online;
         match self.link {
             Link::Offline { .. } => {
                 self.failures = 0;
-                self.dial(now, out);
+                self.dial(cx, out);
             }
-            Link::Waiting { .. } => self.dial(now, out),
+            Link::Waiting { .. } => self.dial(cx, out),
             // A connect while quitting dials once the quit is done.
             _ => {}
         }
     }
 
-    fn disconnect(&mut self, reason: Option<String>, now: Instant, out: &mut Vec<Effect>) {
+    fn disconnect(&mut self, reason: Option<String>, cx: &mut Cx, out: &mut Out) {
         self.desired = Desired::Offline;
         match std::mem::replace(&mut self.link, Link::Offline { last: None }) {
             Link::Online {
@@ -402,22 +428,22 @@ impl Network {
             } => {
                 // The link ends from Quitting, where `end` cannot see how
                 // long it was online, so a stable session resets here.
-                if now.duration_since(since) >= STABLE_ONLINE {
+                if cx.now.mono.duration_since(since) >= STABLE_ONLINE {
                     self.failures = 0;
                 }
-                out.push(Effect::Send {
+                out.effects.push(Effect::Send {
                     conn,
                     line: quit_line(reason),
                 });
                 self.link = Link::Quitting {
                     conn,
                     session,
-                    until: now + QUIT_GRACE,
+                    until: cx.now.mono + QUIT_GRACE,
                 };
             }
             Link::Connecting { conn, .. } | Link::Registering { conn, .. } => {
-                out.push(Effect::Hangup { conn });
-                self.end(Ended::UserQuit, now, out);
+                out.effects.push(Effect::Hangup { conn });
+                self.end(Ended::UserQuit, cx, out);
             }
             Link::Waiting { .. } => {
                 self.link = Link::Offline {
@@ -428,14 +454,14 @@ impl Network {
         }
     }
 
-    fn dial(&mut self, now: Instant, out: &mut Vec<Effect>) {
+    fn dial(&mut self, cx: &mut Cx, out: &mut Out) {
         let addresses = &self.config.addresses;
         let address = addresses[self.next_address].clone();
         self.next_address = (self.next_address + 1) % addresses.len();
         let conn = ConnId(self.next_conn);
         self.next_conn += 1;
-        out.push(Effect::Notice(Notice::Connecting(address.clone())));
-        out.push(Effect::Dial {
+        self.notice(Notice::Connecting(address.clone()), cx, out);
+        out.effects.push(Effect::Dial {
             conn,
             address: address.clone(),
             tls: self.config.tls,
@@ -443,59 +469,59 @@ impl Network {
         self.link = Link::Connecting {
             conn,
             address,
-            deadline: now + CONNECT_DEADLINE,
+            deadline: cx.now.mono + CONNECT_DEADLINE,
         };
     }
 
-    fn expire(&mut self, now: Instant, out: &mut Vec<Effect>) {
-        if self.next_wake().is_none_or(|at| now < at) {
+    fn expire(&mut self, cx: &mut Cx, out: &mut Out) {
+        if self.next_wake().is_none_or(|at| cx.now.mono < at) {
             return;
         }
         match &mut self.link {
-            Link::Waiting { .. } => self.dial(now, out),
+            Link::Waiting { .. } => self.dial(cx, out),
             Link::Connecting { conn, .. } => {
-                out.push(Effect::Hangup { conn: *conn });
-                self.end(Ended::Closed(CloseReason::ConnectTimeout), now, out);
+                out.effects.push(Effect::Hangup { conn: *conn });
+                self.end(Ended::Closed(CloseReason::ConnectTimeout), cx, out);
             }
             Link::Registering { conn, .. } => {
-                out.push(Effect::Hangup { conn: *conn });
-                self.end(Ended::RegistrationTimedOut, now, out);
+                out.effects.push(Effect::Hangup { conn: *conn });
+                self.end(Ended::RegistrationTimedOut, cx, out);
             }
             Link::Online { conn, idle, .. } if !idle.pinged => {
                 idle.pinged = true;
                 let line = Message::new("PING", &[PING_TOKEN]).to_wire();
-                out.push(Effect::Send {
+                out.effects.push(Effect::Send {
                     conn: *conn,
                     line: line.expect("a fixed, valid line"),
                 });
             }
             Link::Online { conn, .. } => {
-                out.push(Effect::Hangup { conn: *conn });
-                self.end(Ended::PingTimeout, now, out);
+                out.effects.push(Effect::Hangup { conn: *conn });
+                self.end(Ended::PingTimeout, cx, out);
             }
             Link::Quitting { conn, .. } => {
-                out.push(Effect::Hangup { conn: *conn });
-                self.end(Ended::UserQuit, now, out);
+                out.effects.push(Effect::Hangup { conn: *conn });
+                self.end(Ended::UserQuit, cx, out);
             }
             Link::Offline { .. } => {}
         }
     }
 
-    fn on_transport(&mut self, event: TransportEvent, now: Instant, out: &mut Vec<Effect>) {
+    fn on_transport(&mut self, event: TransportEvent, cx: &mut Cx, out: &mut Out) {
         match event {
-            TransportEvent::Opened => self.on_opened(now, out),
-            TransportEvent::Line(msg) => self.on_line(&msg, now, out),
+            TransportEvent::Opened => self.on_opened(cx, out),
+            TransportEvent::Line(msg) => self.on_line(&msg, cx, out),
             TransportEvent::Closed(reason) => {
                 let why = match self.link {
                     Link::Quitting { .. } => Ended::UserQuit,
                     _ => Ended::Closed(reason),
                 };
-                self.end(why, now, out);
+                self.end(why, cx, out);
             }
         }
     }
 
-    fn on_opened(&mut self, now: Instant, out: &mut Vec<Effect>) {
+    fn on_opened(&mut self, cx: &mut Cx, out: &mut Out) {
         let Link::Connecting { conn, .. } = self.link else {
             return;
         };
@@ -506,49 +532,49 @@ impl Network {
                 self.link = Link::Registering {
                     conn,
                     reg,
-                    deadline: now + REGISTRATION_TIMEOUT,
+                    deadline: cx.now.mono + REGISTRATION_TIMEOUT,
                 };
-                push_output(conn, reg_out, out);
+                self.push_output(conn, reg_out, cx, out);
             }
             Err(e) => {
-                out.push(Effect::Hangup { conn });
-                self.end(Ended::BadSetup(e), now, out);
+                out.effects.push(Effect::Hangup { conn });
+                self.end(Ended::BadSetup(e), cx, out);
             }
         }
     }
 
-    fn on_line(&mut self, msg: &Message, now: Instant, out: &mut Vec<Effect>) {
+    fn on_line(&mut self, msg: &Message, cx: &mut Cx, out: &mut Out) {
         let Some(conn) = self.conn() else { return };
         let text = || msg.params.last().cloned().unwrap_or_default();
         match (msg.command.as_str(), &mut self.link) {
             ("465", _) => {
-                out.push(Effect::Hangup { conn });
-                self.end(Ended::Banned(text()), now, out);
+                out.effects.push(Effect::Hangup { conn });
+                self.end(Ended::Banned(text()), cx, out);
             }
             ("ERROR", Link::Online { .. }) => {
-                out.push(Effect::Hangup { conn });
-                self.end(Ended::ServerError(text()), now, out);
+                out.effects.push(Effect::Hangup { conn });
+                self.end(Ended::ServerError(text()), cx, out);
             }
             ("ERROR", Link::Quitting { .. }) => {
-                out.push(Effect::Hangup { conn });
-                self.end(Ended::UserQuit, now, out);
+                out.effects.push(Effect::Hangup { conn });
+                self.end(Ended::UserQuit, cx, out);
             }
             (_, Link::Online { session, idle, .. }) => {
                 *idle = Idle {
-                    last_heard: now,
+                    last_heard: cx.now.mono,
                     pinged: false,
                 };
-                let mut send = Vec::new();
-                session.handle(msg, &mut send);
-                out.extend(send.into_iter().map(|line| Effect::Send { conn, line }));
+                session.handle(msg, conn, &mut self.buffers, cx, out);
             }
-            (_, Link::Quitting { session, .. }) => session.handle(msg, &mut Vec::new()),
-            (_, Link::Registering { .. }) => self.step_registration(msg, now, out),
+            (_, Link::Quitting { session, .. }) => {
+                session.handle(msg, conn, &mut self.buffers, cx, out);
+            }
+            (_, Link::Registering { .. }) => self.step_registration(msg, cx, out),
             (_, Link::Offline { .. } | Link::Waiting { .. } | Link::Connecting { .. }) => {}
         }
     }
 
-    fn step_registration(&mut self, msg: &Message, now: Instant, out: &mut Vec<Effect>) {
+    fn step_registration(&mut self, msg: &Message, cx: &mut Cx, out: &mut Out) {
         let Link::Registering {
             conn,
             reg,
@@ -557,9 +583,11 @@ impl Network {
         else {
             unreachable!("only called while registering");
         };
+        let nick = reg.nick().to_owned();
         let mut reg_out = registration::Output::default();
         let progress = reg.step(msg, &mut reg_out);
-        push_output(conn, reg_out, out);
+        self.print_registration_line(msg, &nick, cx, out);
+        self.push_output(conn, reg_out, cx, out);
         match progress {
             Progress::Registering(reg) => {
                 self.link = Link::Registering {
@@ -572,29 +600,143 @@ impl Network {
                 self.link = Link::Online {
                     conn,
                     session: Session::new(registered),
-                    since: now,
+                    since: cx.now.mono,
                     idle: Idle {
-                        last_heard: now,
+                        last_heard: cx.now.mono,
                         pinged: false,
                     },
                 };
             }
             Progress::Failed(failure) => {
-                out.push(Effect::Hangup { conn });
+                out.effects.push(Effect::Hangup { conn });
                 let why = match failure {
                     Failure::NoUsableNick { tried } => Ended::NoUsableNick { tried },
                     Failure::ServerError(text) => Ended::ServerError(text),
                 };
-                self.end(why, now, out);
+                self.end(why, cx, out);
             }
         }
     }
 
+    fn push_output(&mut self, conn: ConnId, reg: registration::Output, cx: &mut Cx, out: &mut Out) {
+        out.effects.extend(
+            reg.lines
+                .into_iter()
+                .map(|line| Effect::Send { conn, line }),
+        );
+        for notice in reg.notices {
+            self.notice(Notice::Registration(notice), cx, out);
+        }
+    }
+
+    /// Prints a connection notice to the console.
+    fn notice(&mut self, notice: Notice, cx: &mut Cx, out: &mut Out) {
+        let line = Line::client(cx.stamp(), notice.to_string());
+        let console = self.buffers.console().id();
+        self.buffers.print(console, line, &mut out.changes);
+    }
+
+    /// What a server says while we register goes to the console, as in
+    /// Textual, except what registration explains itself: CAP, SASL and
+    /// the nick numerics.
+    fn print_registration_line(&mut self, msg: &Message, nick: &str, cx: &mut Cx, out: &mut Out) {
+        if matches!(
+            msg.command.as_str(),
+            "CAP"
+                | "AUTHENTICATE"
+                | "432"
+                | "433"
+                | "437"
+                | "900"
+                | "901"
+                | "902"
+                | "903"
+                | "904"
+                | "905"
+                | "906"
+                | "907"
+                | "908"
+        ) {
+            return;
+        }
+        if let Some((Destination::Server, line)) =
+            Line::from_message(msg, nick, &Isupport::default(), cx.stamp())
+        {
+            let console = self.buffers.console().id();
+            self.buffers.print(console, line, &mut out.changes);
+        }
+    }
+
+    /// Sends a message typed into `buffer`. Without echo-message it is
+    /// printed here; with it, the server's echo prints it.
+    pub(crate) fn say(&mut self, buffer: BufferId, text: &str, cx: &mut Cx, out: &mut Out) {
+        let Some(target) = self.buffers.get(buffer).map(|b| b.name().to_owned()) else {
+            return;
+        };
+        let refusal = match (&self.link, self.buffers.get(buffer)) {
+            (_, Some(b)) if b.is_console() => Some("Messages cannot be sent to this window."),
+            (Link::Online { .. }, Some(b))
+                if b.joined().is_some() || matches!(b.body(), Body::Query) =>
+            {
+                None
+            }
+            (Link::Online { .. }, _) => Some("You are not in this channel."),
+            _ => Some("Not connected."),
+        };
+        if let Some(text) = refusal {
+            let line = Line::client(cx.stamp(), text.to_owned());
+            self.buffers.print(buffer, line, &mut out.changes);
+            return;
+        }
+        let Link::Online { conn, session, .. } = &self.link else {
+            return;
+        };
+        let line = match Message::new("PRIVMSG", &[&target, text]).to_wire() {
+            Ok(line) => line,
+            Err(e) => {
+                let line = Line::client(cx.stamp(), format!("Not sent: {e}"));
+                self.buffers.print(buffer, line, &mut out.changes);
+                return;
+            }
+        };
+        out.effects.push(Effect::Send { conn: *conn, line });
+        if !session.caps().is_enabled("echo-message") {
+            let mut line = Line::new(
+                cx.stamp(),
+                LineType::Privmsg,
+                "PRIVMSG",
+                Some(session.nick()),
+                text.to_owned(),
+            );
+            line.from_self = true;
+            self.buffers.print(buffer, line, &mut out.changes);
+        }
+    }
+
+    /// Closes a channel or query buffer, leaving the channel if we are in
+    /// it. The console stays.
+    pub(crate) fn close(&mut self, buffer: BufferId, out: &mut Out) {
+        let Some(b) = self.buffers.get(buffer) else {
+            return;
+        };
+        if b.is_console() {
+            return;
+        }
+        if b.joined().is_some()
+            && let Link::Online { conn, .. } = &self.link
+            && let Ok(line) = Message::new("PART", &[b.name()]).to_wire()
+        {
+            out.effects.push(Effect::Send { conn: *conn, line });
+        }
+        self.buffers.remove(buffer, &mut out.changes);
+    }
+
     /// Ends the current link (the caller has already hung up if a socket
     /// was open) and decides what comes next.
-    fn end(&mut self, why: Ended, now: Instant, out: &mut Vec<Effect>) {
+    fn end(&mut self, why: Ended, cx: &mut Cx, out: &mut Out) {
+        self.buffers.part_all(&mut out.changes);
         if let Link::Online { since, .. } = self.link
-            && now.duration_since(since) >= STABLE_ONLINE
+            && cx.now.mono.duration_since(since) >= STABLE_ONLINE
         {
             self.failures = 0;
         }
@@ -603,21 +745,23 @@ impl Network {
         }
         let retry = self.desired == Desired::Online && self.config.auto_reconnect && why.retries();
         let retry_in = retry.then(|| backoff(self.config.id, self.failures));
-        out.push(Effect::Notice(Notice::Disconnected {
-            why: why.clone(),
-            retry_in,
-        }));
+        self.notice(
+            Notice::Disconnected {
+                why: why.clone(),
+                retry_in,
+            },
+            cx,
+            out,
+        );
         match retry_in {
             Some(after) => {
                 self.link = Link::Waiting {
-                    until: now + after,
+                    until: cx.now.mono + after,
                     last: why,
                 };
             }
             // `/reconnect` is a quit with the network still wanted online.
-            None if why == Ended::UserQuit && self.desired == Desired::Online => {
-                self.dial(now, out)
-            }
+            None if why == Ended::UserQuit && self.desired == Desired::Online => self.dial(cx, out),
             None => self.link = Link::Offline { last: Some(why) },
         }
     }
@@ -647,19 +791,6 @@ fn quit_line(reason: Option<String>) -> WireLine {
     reason
         .and_then(|r| Message::new("QUIT", &[&r]).to_wire().ok())
         .unwrap_or_else(|| Message::new("QUIT", &[]).to_wire().expect("a bare QUIT"))
-}
-
-fn push_output(conn: ConnId, reg: registration::Output, out: &mut Vec<Effect>) {
-    out.extend(
-        reg.lines
-            .into_iter()
-            .map(|line| Effect::Send { conn, line }),
-    );
-    out.extend(
-        reg.notices
-            .into_iter()
-            .map(|n| Effect::Notice(Notice::Registration(n))),
-    );
 }
 
 #[cfg(test)]

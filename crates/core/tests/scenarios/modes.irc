@@ -1,0 +1,41 @@
+# Prefix modes change the member's rank and move it in the list; other
+# channel modes are kept, list modes are not, and every MODE is printed.
+# `+ov-o dave dave dave` is Ergo's reply shape for that command.
+! welcome multi-prefix
+< :irc.test 005 textual CHANTYPES=# PREFIX=(qaohv)~&@%+ CHANMODES=Ibe,k,fl,CEMRUimnstu :are supported by this server
+< :textual!u@h JOIN #t2
+> MODE #t2
+< :irc.test 353 textual = #t2 :@textual alice dave zed
+< :irc.test 366 textual #t2 :End of NAMES list
+> WHO #t2
+< :irc.test 315 textual #t2 :End of WHO list
+? members #t2 = @textual alice dave zed
+< :textual!u@h MODE #t2 +v zed
+? members #t2 = @textual +zed alice dave
+< :textual!u@h MODE #t2 +ov-o dave dave dave
+? members #t2 = @textual +dave +zed alice
+? line #t2 textual sets mode +ov-o dave dave dave
+< :textual!u@h MODE #t2 +q alice
+? members #t2 = ~alice @textual +dave +zed
+< :textual!u@h MODE #t2 -q+h alice alice
+? members #t2 = @textual %alice +dave +zed
+# Multi-prefix NAMES gives every mode: dropping @ leaves the +.
+< :irc.test 353 textual = #t2 :@+textual dave
+< :irc.test 366 textual #t2 :End of NAMES list
+< :textual!u@h MODE #t2 -o textual
+? members #t2 = +textual dave
+< :irc.test 324 textual #t2 +Cnt
+? modes #t2 +Cnt
+? line #t2 Mode is +Cnt
+< :textual!u@h MODE #t2 +kl-C secret 10
+? modes #t2 +klnt secret 10
+< :textual!u@h MODE #t2 -l+b *!*@bad
+? modes #t2 +knt secret
+? line #t2 textual sets mode -l+b *!*@bad
+# A mode for a member we do not know changes nothing.
+< :textual!u@h MODE #t2 +o ghost
+? members #t2 = +textual dave
+# A user mode goes to the console.
+< :textual!u@h MODE textual +i
+? line console textual sets mode +i
+? registered textual

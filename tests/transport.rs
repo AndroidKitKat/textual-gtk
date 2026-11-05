@@ -357,10 +357,13 @@ async fn ergo_tls_port() {
 async fn a_network_registers_on_ergo_over_tls_and_quits() {
     use std::collections::HashMap;
     use textual_core::irc::caps::WANTED;
-    use textual_core::model::network::{Effect, Input, Link, Network, ServerConfig, ServerId};
+    use textual_core::model::Now;
+    use textual_core::model::network::{Effect, Input, Link, ServerConfig, ServerId};
     use textual_core::model::registration::{Auth, Setup};
+    use textual_core::model::workspace::{self, Workspace};
 
-    let mut net = Network::new(ServerConfig {
+    let mut ws = Workspace::new();
+    let config = ServerConfig {
         id: ServerId(1),
         addresses: vec![Address {
             host: "127.0.0.1".into(),
@@ -378,16 +381,22 @@ async fn a_network_registers_on_ergo_over_tls_and_quits() {
             account_password: None,
         },
         wanted_caps: WANTED.iter().map(|c| (*c).to_owned()).collect(),
-    });
+    };
+    ws.add_network(config, &mut workspace::Out::default());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let runtime = tokio::runtime::Handle::current();
     let mut conns: HashMap<ConnId, Connection> = HashMap::new();
     let mut input = Input::Connect;
     let mut quit_sent = false;
     loop {
-        let mut out = Vec::new();
-        net.update(input, std::time::Instant::now(), &mut out);
-        for effect in out {
+        let mut out = workspace::Out::default();
+        let now = Now {
+            mono: std::time::Instant::now(),
+            wall: chrono::Local::now(),
+        };
+        let server = ServerId(1);
+        ws.update(workspace::Input::Network { server, input }, now, &mut out);
+        for (_, effect) in out.effects {
             match effect {
                 Effect::Dial { conn, address, tls } => {
                     let c = transport::spawn(
@@ -402,9 +411,9 @@ async fn a_network_registers_on_ergo_over_tls_and_quits() {
                 }
                 Effect::Send { conn, line } => conns[&conn].send(line),
                 Effect::Hangup { conn } => drop(conns.remove(&conn)),
-                Effect::Notice(_) => {}
             }
         }
+        let net = ws.network(ServerId(1)).expect("added");
         match net.link() {
             Link::Online { session, .. } if !quit_sent => {
                 assert_eq!(session.nick(), "lifecycle");
@@ -430,4 +439,164 @@ async fn a_network_registers_on_ergo_over_tls_and_quits() {
             .expect("events");
         input = Input::Transport { conn, event };
     }
+}
+
+/// A workspace on Ergo's plain port follows a second client through JOIN,
+/// MODE, a private message, NICK and QUIT, with the line shapes Ergo really
+/// sends. Run as `ergo_tls_port` is.
+#[tokio::test]
+#[ignore]
+async fn a_workspace_follows_members_on_ergo() {
+    use std::collections::HashMap;
+    use textual_core::irc::caps::WANTED;
+    use textual_core::model::Now;
+    use textual_core::model::network::{Effect, Input, Link, ServerConfig, ServerId};
+    use textual_core::model::registration::{Auth, Setup};
+    use textual_core::model::workspace::{self, Workspace};
+
+    let suffix = std::process::id() % 100_000;
+    let (me, other, channel) = (
+        format!("ws{suffix}"),
+        format!("peer{suffix}"),
+        format!("#ws{suffix}"),
+    );
+    let server = ServerId(1);
+    let mut ws = Workspace::new();
+    ws.add_network(
+        ServerConfig {
+            id: server,
+            addresses: vec![Address {
+                host: "127.0.0.1".into(),
+                port: 6667,
+            }],
+            tls: Tls::Off,
+            auto_reconnect: false,
+            setup: Setup {
+                nick: me.clone(),
+                alternates: Vec::new(),
+                username: "ws".into(),
+                realname: "Textual".into(),
+                auth: Auth::None,
+                server_password: None,
+                account_password: None,
+            },
+            wanted_caps: WANTED.iter().map(|c| (*c).to_owned()).collect(),
+        },
+        &mut workspace::Out::default(),
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let runtime = tokio::runtime::Handle::current();
+    let mut conns: HashMap<ConnId, Connection> = HashMap::new();
+
+    let step = |ws: &mut Workspace, input: Input, conns: &mut HashMap<ConnId, Connection>| {
+        let mut out = workspace::Out::default();
+        let now = Now {
+            mono: std::time::Instant::now(),
+            wall: chrono::Local::now(),
+        };
+        ws.update(workspace::Input::Network { server, input }, now, &mut out);
+        for (_, effect) in out.effects {
+            match effect {
+                Effect::Dial { conn, address, tls } => {
+                    let c = transport::spawn(
+                        &runtime,
+                        conn,
+                        address,
+                        tls,
+                        Settings::default(),
+                        tx.clone(),
+                    );
+                    conns.insert(conn, c);
+                }
+                Effect::Send { conn, line } => conns[&conn].send(line),
+                Effect::Hangup { conn } => drop(conns.remove(&conn)),
+            }
+        }
+    };
+    let members = |ws: &Workspace| -> Option<String> {
+        let net = ws.network(server)?;
+        let prefix = net.session()?.isupport().prefix().to_vec();
+        let buffer = net.buffers().iter().find(|b| b.name() == channel)?;
+        let rows: Vec<String> = buffer
+            .joined()?
+            .members()
+            .rows(&prefix)
+            .map(|r| {
+                let symbol = r.prefix.map(|p| p.1.to_string()).unwrap_or_default();
+                format!("{symbol}{}", r.nick)
+            })
+            .collect();
+        Some(rows.join(" "))
+    };
+    macro_rules! pump_until {
+        ($what:expr, $done:expr) => {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !$done(&ws) {
+                let (conn, event) = timeout(deadline - Instant::now(), rx.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("timed out waiting for {}", $what))
+                    .expect("events");
+                step(&mut ws, Input::Transport { conn, event }, &mut conns);
+            }
+        };
+    }
+
+    step(&mut ws, Input::Connect, &mut conns);
+    pump_until!("registration", |ws: &Workspace| matches!(
+        ws.network(server).unwrap().link(),
+        Link::Online { .. }
+    ));
+    let conn = *conns.keys().next().unwrap();
+    conns[&conn].send(wire(&format!("JOIN {channel}")));
+    pump_until!("our join", |ws: &Workspace| members(ws)
+        .is_some_and(|m| m == format!("@{me}")));
+
+    let peer = tokio::net::TcpStream::connect("127.0.0.1:6667")
+        .await
+        .unwrap();
+    let mut peer = FakeServer::new(Box::new(peer));
+    for line in [
+        format!("NICK {other}"),
+        format!("USER {other} 0 * :peer"),
+        format!("JOIN {channel}"),
+    ] {
+        peer.say(&line).await;
+    }
+    pump_until!("the peer's join", |ws: &Workspace| members(ws)
+        .is_some_and(|m| m == format!("@{me} {other}")));
+    conns[&conn].send(wire(&format!("MODE {channel} +v {other}")));
+    pump_until!("the voice", |ws: &Workspace| members(ws)
+        .is_some_and(|m| m == format!("@{me} +{other}")));
+    peer.say(&format!("PRIVMSG {me} :hello {me}")).await;
+    pump_until!("the query", |ws: &Workspace| ws
+        .network(server)
+        .unwrap()
+        .buffers()
+        .iter()
+        .any(|b| b.name() == other && b.counters().highlights == 1));
+    let renamed = format!("{other}x");
+    peer.say(&format!("NICK {renamed}")).await;
+    pump_until!("the rename", |ws: &Workspace| members(ws)
+        .is_some_and(|m| m == format!("@{me} +{renamed}")));
+    let net = ws.network(server).unwrap();
+    assert!(
+        net.buffers().iter().any(|b| b.name() == renamed),
+        "query renamed"
+    );
+    peer.say("QUIT :bye").await;
+    pump_until!("the quit", |ws: &Workspace| members(ws)
+        .is_some_and(|m| m == format!("@{me}")));
+    let query = ws
+        .network(server)
+        .unwrap()
+        .buffers()
+        .iter()
+        .find(|b| b.name() == renamed)
+        .unwrap();
+    let last = query.scrollback().last().unwrap().plain_text();
+    assert!(
+        last.starts_with(&format!("{renamed} (")) && last.contains("left IRC"),
+        "{last}"
+    );
+    step(&mut ws, Input::Disconnect { reason: None }, &mut conns);
 }

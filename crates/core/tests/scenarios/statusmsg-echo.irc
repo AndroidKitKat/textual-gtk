@@ -1,0 +1,12 @@
+# Our echoed `PRIVMSG @#cap` (STATUSMSG, to the channel's ops) belongs to
+# #cap, not to a query named @#cap. Shape from Ergo with echo-message.
+! welcome echo-message message-tags
+< :irc.test 005 textual CHANTYPES=# PREFIX=(qaohv)~&@%+ STATUSMSG=~&@%+ :are supported by this server
+< :textual!~u@h JOIN #cap
+> MODE #cap
+< @msgid=t3hz3r5n4emajfvgwpkkeede4n :textual!~u@5aftjv5fggq76.irc PRIVMSG @#cap :ops only
+? line #cap <textual> ops only
+< :alice!a@h PRIVMSG +#cap :voiced only
+? line #cap <alice> voiced only
+? buffers = console #cap
+? registered textual

@@ -1,0 +1,24 @@
+# Without echo-message, a sent message is printed at once. Text for the
+# console, a parted channel or an offline network is refused with a notice.
+! welcome
+< :textual!u@h JOIN #c
+> MODE #c
+! say #c hi all
+> PRIVMSG #c :hi all
+? line #c <textual> hi all
+? unread #c 0 highlights 0
+! say console hello
+? line console Messages cannot be sent to this window.
+? notice Messages cannot be sent to this window.
+< :textual!u@h PART #c
+! say #c anyone?
+? line #c You are not in this channel.
+! disconnect
+> QUIT
+< ERROR :Closing Link
+> hangup #1
+? notice Disconnected: quit
+< :bob!b@h PRIVMSG textual :late
+! say #c x
+? line #c Not connected.
+? offline user-quit

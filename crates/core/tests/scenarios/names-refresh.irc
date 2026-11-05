@@ -1,0 +1,27 @@
+# A second NAMES replaces the list rather than being ignored (Textual's
+# bug). With away-notify the server keeps away state current, so no WHO
+# goes out; nor for a channel of 500 or more.
+! welcome multi-prefix away-notify
+< :irc.test 005 textual CHANTYPES=# :are supported by this server
+< :textual!u@h JOIN #c
+> MODE #c
+< :irc.test 353 textual = #c :@textual bob
+< :irc.test 366 textual #c :End of NAMES list
+? members #c = @textual bob
+< :irc.test 353 textual = #c :@textual +carol
+< :irc.test 366 textual #c :End of NAMES list
+? members #c = @textual +carol
+# A 366 with no 353 before it leaves the list alone.
+< :irc.test 366 textual #c :End of NAMES list
+? members #c = @textual +carol
+< :bob!b@h AWAY :gone
+< :carol!c@h AWAY :gone
+? members #c = @textual +carol(away)
+< :carol!c@h AWAY
+? members #c = @textual +carol
+# NAMES for a channel we are not in changes nothing and prints nothing.
+< :irc.test 353 textual = #other :x y
+< :irc.test 366 textual #other :End of NAMES list
+? buffers = console #c
+? lines console 3
+? registered textual

@@ -1,0 +1,37 @@
+# NAMES can span several 353 lines. The member list changes once, at 366,
+# not line by line. Without away-notify a hidden WHOX follows, so away
+# flags are known; its replies are not printed. Shapes from Ergo 2.19 with
+# multi-prefix and userhost-in-names.
+! welcome multi-prefix userhost-in-names
+< :irc.test 005 textual CHANTYPES=# PREFIX=(qaohv)~&@%+ STATUSMSG=~&@%+ WHOX :are supported by this server
+< :textual!~u@host.test JOIN #c
+> MODE #c
+? buffers = console #c
+? joined #c
+? members #c = textual
+? line #c textual (~u@host.test) joined the channel
+< :irc.test 353 textual = #c :@alice!a@h1 +bob!b@h2
+? members #c = textual
+< :irc.test 353 textual = #c :carol!c@h3 @+textual!~u@host.test
+? members #c = textual
+< :irc.test 366 textual #c :End of NAMES list
+> WHO #c %tcuhnfa,152
+? members #c = @alice @textual +bob carol
+< :irc.test 354 textual 152 #c b h2 bob G+ 0
+< :irc.test 354 textual 152 #c a h1 alice H@ alice
+< :irc.test 315 textual #c :End of WHO list
+? members #c = @alice @textual +bob(away) carol
+# Nothing of NAMES or the hidden WHO was printed.
+? lines #c 1
+? lines console 3
+? line console CHANTYPES=# PREFIX=(qaohv)~&@%+ STATUSMSG=~&@%+ WHOX are supported by this server
+# A WHO the user asks for is printed, and a later NAMES sends no WHO.
+< :irc.test 352 textual #c b h2 irc.test bob H+ :0 Bob
+? line console #c b h2 irc.test bob H+ 0 Bob
+? members #c = @alice @textual +bob(away) carol
+< :irc.test 315 textual #c :End of WHO list
+? line console #c End of WHO list
+< :irc.test 353 textual = #c :@alice!a@h1 @+textual!~u@host.test
+< :irc.test 366 textual #c :End of NAMES list
+? members #c = @alice @textual
+? registered textual

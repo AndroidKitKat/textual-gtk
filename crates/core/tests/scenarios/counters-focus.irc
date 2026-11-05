@@ -1,0 +1,34 @@
+# Unread counts a message unless its buffer is focused in an active
+# window. Focusing a buffer clears its counters; so does the window
+# becoming active again with the buffer focused.
+! welcome
+< :textual!u@h JOIN #a
+> MODE #a
+< :textual!u@h JOIN #b
+> MODE #b
+? focus console
+< :bob!b@h PRIVMSG #a :one
+? unread #a 1 highlights 0
+! focus #a
+? focus #a
+? unread #a 0 highlights 0
+< :bob!b@h PRIVMSG #a :two textual
+? unread #a 0 highlights 0
+< :bob!b@h PRIVMSG #b :three
+? unread #b 1 highlights 0
+# Focusing what is focused changes nothing.
+! focus #a
+? focus #a
+! window inactive
+< :bob!b@h PRIVMSG #a :four textual
+< :bob!b@h PRIVMSG #a :five
+? unread #a 2 highlights 1
+! window active
+? unread #a 0 highlights 0
+? unread #b 1 highlights 0
+! window inactive
+! focus #b
+? unread #b 1 highlights 0
+! window active
+? unread #b 0 highlights 0
+? registered textual
