@@ -7,18 +7,20 @@ A Linux rebuild of the macOS IRC client [Textual](https://github.com/Codeux-Soft
 ```sh
 scripts/dev-setup.sh        # system libraries, plus an AppArmor profile on Ubuntu 24.04+
 cargo build
-target/debug/textual-gtk --server 127.0.0.1:6667 --nick me --channel '#textual'
+target/debug/textual-gtk \
+  --network 'name=Libera,host=irc.libera.chat,tls=on,nick=me,join=#textual' \
+  --network 'name=Local,host=127.0.0.1,port=6667,nick=me,join=#a #b:key'
 ```
 
-Options: `--server host:port`, `--nick`, `--channel`, `--style` (a folder name under `resources/styling/Bundled Styles`, default `Simplified`).
+Each `--network` is a comma-separated list of `key=value` pairs and adds one network to the sidebar. `name`, `host` and `nick` are required; names must be unique. Optional: `port` (6667, or 6697 when `tls=on`), `tls=off|on` (off), `verify=true|false` (true; whether to check the server's certificate chain, with `tls=on`), `user` (the nick), `realname` (`Textual GTK`), `join` (space-separated channels to join once online; `#chan:key` for a keyed channel). `--style name` picks a folder under `resources/styling/Bundled Styles` (default `Simplified`). The saved configuration replaces these flags in a later unit.
 
 ## Checks
 
 ```sh
 scripts/check.sh            # fmt, clippy, unit and integration tests
 scripts/test-server.sh      # local Ergo on 127.0.0.1:6667/6697, limits lifted for tests
-cargo test --test connection -- --ignored   # two clients through the real server
-python3 scripts/e2e.py      # the app under Xvfb shows a live message
+cargo test --test transport -- --ignored    # the model and transport against the real server
+python3 scripts/e2e.py      # the app under Xvfb on two networks: sidebar, members, badges, reload, quit
 ```
 
 ## License
