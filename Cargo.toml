@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/core"]
+default-members = [".", "crates/core"]
 
 [package]
 name = "textual-gtk"
