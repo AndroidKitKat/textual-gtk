@@ -10,3 +10,4 @@
 - 2026-11-05 (default, Michael can override): the name stays "textual-gtk" for now. The application ID is `io.github.androidkitkat.TextualGtk` until a name is chosen.
 - 2026-11-05 (default, Michael can override): OTR is not decided until phase 3. Nothing in phases 1 and 2 depends on it.
 - 2026-11-05 (default, Michael can override): keep Textual's structure and behaviour, drawn with libadwaita (header bar, Adwaita widgets) rather than copying macOS chrome.
+- 2026-11-05: libadwaita stays, plus an appearance setting "Textual for Mac" that loads an extra stylesheet restyling the window chrome (sidebar, server list, member list, input bar) to look like the macOS app. Decided by Michael. Phase-2 widgets get stable CSS class names so the stylesheet needs no code changes; the setting itself lands with the preferences window in phase 3, matched against screenshots of the Mac app.
