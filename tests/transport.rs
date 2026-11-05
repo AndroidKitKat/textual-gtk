@@ -132,6 +132,17 @@ async fn lines_are_framed_across_reads_and_parsed() {
 }
 
 #[tokio::test]
+async fn a_line_sent_while_a_server_line_is_half_read_corrupts_neither() {
+    let (mut server, conn, mut events) = start(Settings::default()).await;
+    server.raw(b":a!b@c PRIVMSG #x :hel").await;
+    sleep(Duration::from_millis(50)).await;
+    conn.send(wire("PRIVMSG #x :typing"));
+    assert_eq!(server.expect().await, "PRIVMSG #x typing");
+    server.raw(b"lo world\r\n").await;
+    assert_eq!(next_line(&mut events).await.params, ["#x", "hello world"]);
+}
+
+#[tokio::test]
 async fn overlong_and_unterminated_lines_are_dropped_not_truncated() {
     let (mut server, _conn, mut events) = start(Settings::default()).await;
     let mut long = vec![b'a'; 9000];
