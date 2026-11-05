@@ -14,7 +14,7 @@ use webkit6::{
     UserContentManager, WebContext, WebView,
 };
 
-use textual_core::style::{Font, Style};
+use textual_core::style::{Font, Style, ViewKind};
 
 /// The 40 handlers Textual registers (`TVCLogViewInternalWK2.m:95-134`).
 /// Simplified needs only `finishedLayingOutView` and the two line
@@ -71,7 +71,11 @@ const CRASH_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 struct Inner {
     view: WebView,
     page_uri: String,
-    channel: String,
+    /// `ViewKind::token`, and the channel or nick (none for a console).
+    kind: &'static str,
+    name: Option<String>,
+    /// Only a channel's page has one.
+    topic_bar: bool,
     style: Rc<Style>,
     /// Whether the page has been filled since it last loaded. Calls made
     /// before then are dropped by Textual's JS, and the model holds the
@@ -93,7 +97,10 @@ impl Inner {
         )
     }
 
-    fn topic_script(&self, topic: &str) -> String {
+    fn topic_script(&self, topic: &str) -> Option<String> {
+        if !self.topic_bar {
+            return None;
+        }
         let fragment = |ctx: &textual_core::style::template::Value| {
             self.style
                 .render("formattedMessageFragment", ctx)
@@ -107,11 +114,11 @@ impl Inner {
         };
         let html = textual_core::style::body::render(topic, false, &fragment);
         let plain: String = topic.chars().filter(|c| *c >= ' ').collect();
-        format!(
+        Some(format!(
             "Textual.setTopicBarValue({}, {});",
             json(&plain),
             json(&html)
-        )
+        ))
     }
 
     /// Textual's `logViewWebViewFinishedLoading`: set up auto-scroll and the
@@ -120,11 +127,12 @@ impl Inner {
         evaluate(
             &self.view,
             &format!(
-                "Textual.viewInitiated(\"channel\", \"client\", \"channel\", {});\
+                "Textual.viewInitiated({}, \"client\", {name}, {name});\
                  _Textual.viewFinishedLoading({{\"selected\": true, \"visible\": true, \
                  \"reloadingTheme\": false, \"textSizeMultiplier\": 1.0, \"scrollbackLimit\": 0}});\
                  _Textual.viewFinishedLoadingHistory();",
-                json(&self.channel)
+                json(self.kind),
+                name = self.name.as_deref().map_or("null".to_owned(), json)
             ),
         );
         self.needs_replay = true;
@@ -149,7 +157,7 @@ impl ChatView {
     /// loaded and `needs_replay` is set.
     pub fn new(
         style: Rc<Style>,
-        channel: &str,
+        kind: ViewKind,
         pages: &Path,
         related: Option<&WebView>,
         on_ready: impl Fn() + 'static,
@@ -171,7 +179,7 @@ impl ChatView {
 
         let page_uri = match write_page(
             pages,
-            &style.initial_document(channel, &default_font(), &cache_token()),
+            &style.initial_document(kind, &default_font(), &cache_token()),
         ) {
             Ok(path) => glib::filename_to_uri(&path, None)
                 .expect("absolute path")
@@ -186,7 +194,9 @@ impl ChatView {
             inner: Rc::new(RefCell::new(Inner {
                 view: view.clone(),
                 page_uri: page_uri.clone(),
-                channel: channel.to_owned(),
+                kind: kind.token(),
+                name: kind.name().map(str::to_owned),
+                topic_bar: matches!(kind, ViewKind::Channel(_)),
                 style,
                 ready: false,
                 needs_replay: false,
@@ -269,7 +279,9 @@ impl ChatView {
     /// which `append` and `set_topic` reach it directly.
     pub fn fill(&self, topic: &str, lines: impl Iterator<Item = (String, String)>) {
         let mut inner = self.inner.borrow_mut();
-        evaluate(&inner.view, &inner.topic_script(topic));
+        if let Some(script) = inner.topic_script(topic) {
+            evaluate(&inner.view, &script);
+        }
         for line in lines {
             evaluate(&inner.view, &Inner::append_script(&line));
         }
@@ -291,8 +303,10 @@ impl ChatView {
     /// Shows `topic` (IRC formatting allowed) in the style's topic bar.
     pub fn set_topic(&self, topic: &str) {
         let inner = self.inner.borrow();
-        if inner.ready {
-            evaluate(&inner.view, &inner.topic_script(topic));
+        if inner.ready
+            && let Some(script) = inner.topic_script(topic)
+        {
+            evaluate(&inner.view, &script);
         }
     }
 

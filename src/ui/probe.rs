@@ -22,6 +22,8 @@ const PAGE_STATE: &str = "({\
     lastHtml: (document.querySelector('#messageBuffer > .line:last-child') || {}).innerHTML || '',\
     bodyOpacity: getComputedStyle(document.getElementById('body')).opacity,\
     topic: (document.getElementById('topicBar') || {}).innerText || '',\
+    hasTopicBar: !!document.getElementById('topicBar'),\
+    viewType: document.body.dataset.viewType || null,\
     loadedAt: performance.timeOrigin\
 })";
 

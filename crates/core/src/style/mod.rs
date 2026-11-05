@@ -186,10 +186,10 @@ impl Style {
         Some(html.replace(['\r', '\n'], ""))
     }
 
-    /// The page a channel view loads: `baseLayout` with the keys Textual's
+    /// The page a buffer's view loads: `baseLayout` with the keys Textual's
     /// `TVCLogController initialDocument` sets. `cache_token` busts WebKit's
     /// cache when the style is reloaded.
-    pub fn initial_document(&self, channel: &str, font: &Font, cache_token: &str) -> String {
+    pub fn initial_document(&self, view: ViewKind, font: &Font, cache_token: &str) -> String {
         let paths = |files: &[PathBuf]| {
             Value::List(files.iter().map(|p| Value::Str(file_url(p))).collect())
         };
@@ -197,7 +197,7 @@ impl Style {
             Appearance::Light => "light",
             Appearance::Dark => "dark",
         };
-        let context: Vec<(&str, Value)> = vec![
+        let mut context: Vec<(&str, Value)> = vec![
             ("userConfiguredTextEncoding", "utf-8".into()),
             ("activeStyleCSSFiles", paths(&self.css_files)),
             ("activeStyleJSFiles", paths(&self.js_files)),
@@ -218,10 +218,16 @@ impl Style {
             ("appearanceToken", appearance.into()),
             ("usesCustomScrollers", false.into()),
             ("operatingSystemVersion", "linux".into()),
-            ("isChannelView", true.into()),
-            ("channelName", channel.into()),
-            ("viewTypeToken", "channel".into()),
+            ("isChannelView", matches!(view, ViewKind::Channel(_)).into()),
+            (
+                "isPrivateMessageView",
+                matches!(view, ViewKind::Query(_)).into(),
+            ),
+            ("viewTypeToken", view.token().into()),
         ];
+        if let Some(name) = view.name() {
+            context.push(("channelName", name.into()));
+        }
         let context = Value::Map(
             context
                 .into_iter()
@@ -229,6 +235,36 @@ impl Style {
                 .collect(),
         );
         self.render("baseLayout", &context).unwrap_or_default()
+    }
+}
+
+/// What a view shows, as Textual tells its page: a channel gets the topic
+/// bar, and the style's scripts see the type in `data-view-type` and
+/// `Textual.viewInitiated`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewKind<'a> {
+    /// A network's console.
+    Server,
+    Channel(&'a str),
+    Query(&'a str),
+}
+
+impl<'a> ViewKind<'a> {
+    /// Textual's `channelTypeString`, or `server` for a console.
+    pub fn token(self) -> &'static str {
+        match self {
+            ViewKind::Server => "server",
+            ViewKind::Channel(_) => "channel",
+            ViewKind::Query(_) => "query",
+        }
+    }
+
+    /// The channel name or the query's nick; a console has none.
+    pub fn name(self) -> Option<&'a str> {
+        match self {
+            ViewKind::Server => None,
+            ViewKind::Channel(name) | ViewKind::Query(name) => Some(name),
+        }
     }
 }
 

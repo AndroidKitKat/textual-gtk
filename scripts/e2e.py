@@ -8,8 +8,12 @@ rows, title, the focused page's DOM) to a JSON file once a second and takes
 clicks from an actions file. A second and third client talk to it. Checks:
 autojoin on both networks, the message path through the page, badges and
 highlights on an unfocused channel, the member list following NAMES, JOIN,
-MODE and PART, collapsing the focused buffer's server, a page reload, a
-killed web process, and a clean QUIT from both nicks when the window closes.
+MODE and PART, collapsing the focused buffer's server, two selections in
+one tick, the page's view type (server, channel, query), an opaque header
+bar and input strip, a page reload, a killed web process, a clean QUIT
+from both nicks when the window closes, and no GLib criticals or warnings
+from the app. A second, short run against a fake server checks that
+buffers opened by one server write keep the model's order in the sidebar.
 
     scripts/e2e.py [--server 127.0.0.1:6667] [--tls-port 6697] [--out DIR]
                    [--binary PATH]
@@ -367,6 +371,9 @@ def main():
         network = view["subtitle"].split(" on ")[-1]
         checks["the console title names the network and nick"] = view["subtitle"] == f"{app_nick} on {network}" and view["title"] == network
         checks["the window keeps libadwaita's background class next to tx-window"] = {"background", "tx-window"} <= set(view["window_classes"])
+        console = probe.wait_page(lambda p: p["viewType"] is not None, "the console page to load")
+        checks["the console page is a server view"] = console["viewType"] == "server"
+        checks["the console page has no topic bar"] = not console["hasTopicBar"]
         time.sleep(1.5)
         snapshot = prefix.with_suffix(".png")
         checks["the header bar is painted opaque"] = opaque_at(snapshot, -40, 8)
@@ -395,6 +402,7 @@ def main():
         checks["the join line came first"] = state["lines"] >= 2
         checks["the style faded the page in"] = float(state["bodyOpacity"]) > 0.99
         checks["the topic bar shows the topic"] = state["topic"].replace("\xa0", " ") == f"topic {token}"
+        checks["the channel page is a channel view"] = state["viewType"] == "channel" and state["hasTopicBar"]
         checks["a message in the focused channel leaves no badge"] = row(probe.state()["view"], f"Local/{channel}")["badge"] == ""
 
         talker.send(f"PRIVMSG {channel2} :{app_nick}: psst")
@@ -481,6 +489,14 @@ def main():
         talker.send(f"TOPIC {channel} :")
         cleared = probe.wait_page(lambda p: p["topic"] == "(No Topic)", "the topic bar to clear", 10)
         checks["an empty topic shows (No Topic)"] = cleared["topic"] == "(No Topic)"
+
+        talker.send(f"PRIVMSG {app_nick} :a query {token}")
+        probe.wait_view(lambda v: row(v, f"Local/{talker_nick}"), "the query row")
+        probe.act({"select": f"Local/{talker_nick}"})
+        query = probe.wait_until(
+            lambda s: s["view"]["focus"] == f"Local/{talker_nick}" and s["page"] and f"a query {token}" in s["page"]["last"],
+            "the query page to show the message")["page"]
+        checks["the query page is a query view without a topic bar"] = query["viewType"] == "query" and not query["hasTopicBar"]
 
         checks["snapshot written"] = snapshot.exists() and snapshot.stat().st_size > 5000
 

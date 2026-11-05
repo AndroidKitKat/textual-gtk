@@ -12,11 +12,11 @@ use std::time::Instant;
 use adw::prelude::*;
 use gtk::glib;
 use textual_core::model::Change;
-use textual_core::model::buffer::BufferId;
+use textual_core::model::buffer::{Body, BufferId};
 use textual_core::model::members::MemberDiff;
 use textual_core::model::network::Link;
 use textual_core::model::workspace::{Input, UiAction, Workspace};
-use textual_core::style::Style;
+use textual_core::style::{Style, ViewKind};
 
 use crate::app::{Inbox, Request};
 use crate::ui::chat_view::ChatView;
@@ -218,9 +218,14 @@ impl View {
             };
             let first = self.chats.values().next().map(ChatView::widget);
             let tx = self.tx.clone();
+            let kind = match buf.body() {
+                Body::Console => ViewKind::Server,
+                Body::Channel(_) => ViewKind::Channel(buf.name()),
+                Body::Query => ViewKind::Query(buf.name()),
+            };
             let chat = ChatView::new(
                 self.style.clone(),
-                buf.name(),
+                kind,
                 &self.pages,
                 first.as_ref(),
                 move || {

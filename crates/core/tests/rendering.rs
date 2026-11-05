@@ -4,7 +4,7 @@ use chrono::{Local, TimeZone};
 use textual_core::irc::Message;
 use textual_core::irc::isupport::Isupport;
 use textual_core::line::{Line, LineId, LineType, Stamp};
-use textual_core::style::{Appearance, Font, Style};
+use textual_core::style::{Appearance, Font, Style, ViewKind};
 
 fn resources() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/styling")
@@ -106,7 +106,7 @@ fn the_initial_document_loads_the_style_and_textual_js() {
         family: "Sans".into(),
         points: 12.0,
     };
-    let html = style.initial_document("#textual", &font, "42");
+    let html = style.initial_document(ViewKind::Channel("#textual"), &font, "42");
     let css = textual_core::style::file_url(&style.css_files[0]);
     assert!(
         css.starts_with("file:///") && css.contains("Bundled%20Styles"),
@@ -118,4 +118,36 @@ fn the_initial_document_loads_the_style_and_textual_js() {
     assert!(html.contains("data-view-name=\"#textual\""), "{html}");
     assert!(html.contains("id=\"topicBar\""), "{html}");
     assert!(html.contains("font-size: 9pt"), "{html}");
+}
+
+fn initial_document(view: ViewKind) -> String {
+    let font = Font {
+        family: "Sans".into(),
+        points: 12.0,
+    };
+    simplified().initial_document(view, &font, "42")
+}
+
+#[test]
+fn a_channel_view_is_a_channel_with_a_topic_bar() {
+    let html = initial_document(ViewKind::Channel("#textual"));
+    assert!(html.contains("data-view-type=\"channel\""), "{html}");
+    assert!(html.contains("data-view-name=\"#textual\""), "{html}");
+    assert!(html.contains("id=\"topicBar\""), "{html}");
+}
+
+#[test]
+fn a_query_view_names_the_nick_and_has_no_topic_bar() {
+    let html = initial_document(ViewKind::Query("bob"));
+    assert!(html.contains("data-view-type=\"query\""), "{html}");
+    assert!(html.contains("data-view-name=\"bob\""), "{html}");
+    assert!(!html.contains("id=\"topicBar\""), "{html}");
+}
+
+#[test]
+fn a_console_view_is_a_server_view_without_a_name_or_topic_bar() {
+    let html = initial_document(ViewKind::Server);
+    assert!(html.contains("data-view-type=\"server\""), "{html}");
+    assert!(!html.contains("data-view-name="), "{html}");
+    assert!(!html.contains("id=\"topicBar\""), "{html}");
 }
