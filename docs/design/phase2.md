@@ -16,6 +16,8 @@ let workspace = Workspace::new(boot);
 let view = View::build(app, &style, tx.clone());             // every signal handler only does tx.send(Msg::Ui(..))
 let io = Io::new(runtime.handle().clone(), tx.clone(), boot.paths);
 io.load_secrets();                                           // later Msg::SecretsLoaded
+let _tokio = runtime.enter();                                // held for the app's lifetime: the loop
+                                                             // sleeps with tokio::time::sleep_until
 glib::spawn_future_local(app::run(workspace, view, io, rx));
 
 // app::run, the only loop
@@ -69,6 +71,7 @@ Link = Offline { last: Option<Ended> }
 - `Session` (nick, hostmask, acked caps, `Isupport`, casemap, channel states and members) exists only inside the live variants. A disconnect drops it, so no reset can forget a field. `Registration` (CAP phase, SASL phase, nick attempt, the one-shot secrets) exists only while registering, so secrets are dropped at 001.
 - `Desired` is separate from `Link`: "offline because the user said so" and "offline and retrying" are different states.
 - Every transport event carries `ConnId`; an event from another conn is dropped. `Hangup` of a stale conn is a no-op.
+- The loop waits on `rx.recv()` raced against `tokio::time::sleep_until(workspace.next_wake())`, with the runtime entered on the GTK thread (without it the sleep panics inside the glib future and the loop dies silently; measured). Not `glib::timeout_future`: it truncates to whole milliseconds, wakes just before the deadline, and the loop spins until the clock passes it (49 empty passes for one timer in a prototype).
 - Timers are derived: `Network::next_wake()` is the minimum of the variant's deadline (retry due, 240 s watchdog, 270 s idle PING, 360 s idle close, quit grace) and a `later` queue (kick rejoin, NickServ wait). The loop sleeps until `Workspace::next_wake()`. Nothing is scheduled or cancelled.
 - Backoff: 5 s doubling to a 300 s cap with jitter derived from (server id, failures), so tests are deterministic. `failures` lives on `Network`, not in `Link`, because it has to survive the live variants: it goes up when a link ends and resets only once a link has stayed `Online` for 60 s, so a server that accepts and drops us still backs off. No retry after a user quit, a bad certificate, a ban, ERROR "Excess Flood"/"SendQ", or `auto_reconnect = false`. Addresses rotate round-robin. `gio::NetworkMonitor` regaining the network skips a pending wait.
 
@@ -97,7 +100,7 @@ One function resolves a destination. It first strips STATUSMSG symbols with `Isu
 `Change` carries ids, plus the payloads that cannot be pulled afterwards (`Line`, `MemberDiff`). The view pulls everything else from `&Workspace`. Because the view applies a whole pass against the final workspace, a buffer that is rebuilt from state in a pass (its member list reset on `Change::Focus`, or its chat view created and filled from `Scrollback`) ignores that pass's `Line` and `MemberDiff` payloads for it: the final state already contains them. Applying both duplicated members and lines in a model of these rules. Widget commands (set input text, ask for confirmation) are `Effect::Ui`, not `Change`, so `Change` stays model facts.
 
 - Sidebar: `gtk::ListView` over `gtk::TreeListModel`; root `gio::ListStore` of `ServerRow`, each with a child `ListStore` of `BufferRow`. Rows are small GObject subclasses with properties (label, kind, state, unread, highlights) updated in place, never replaced, so expansion and selection survive. The view keeps `HashMap<BufferId, BufferRow>` for lookup.
-- Selection: `gtk::SingleSelection` sends `UiAction::Select`; model-initiated focus moves come back as `Change::Focus` and the view calls `set_selected` (selecting the selected row emits nothing).
+- Selection and expansion are both owned by the model. The view wires `SingleSelection`'s `notify::selected-item`, not `selection-changed`: GTK moves the selection itself when the selected row disappears (a collapse, a removal) and then emits only the notify. Each `TreeListRow`'s `notify::expanded` sends `UiAction::SetExpanded(server, bool)`. Rules in the model: collapsing the server of the focused buffer focuses that server's console; focusing a buffer under a collapsed server expands it first. Model-initiated moves come back as `Change::Focus` / `Change::Expanded`; the view expands the parent row, then calls `set_selected` (selecting the selected row emits nothing, so the echo costs one no-op message). Measured in a prototype: without these rules a collapse left the sidebar on one server and the model on another.
 - Member list: one `gio::ListStore<MemberRow>`; on focus the view resets it from `workspace.members(focused)`, then applies `MemberDiff`s for the focused buffer only.
 - Chat views: one `ChatView` per buffer, created on first focus, filled from the buffer's `Scrollback`, kept in a `gtk::Stack`. The replay deque in `ChatView` is replaced by the model's `Scrollback`. One shared web process.
 - Title: a pure function of link state, nick, network, and channel name/count/modes or query nick/host. Topic goes to the chat view's topic bar.
@@ -124,7 +127,7 @@ One function resolves a destination. It first strips STATUSMSG symbols with `Isu
 - Unit: casemap vectors, `Isupport`, `Caps`, `SaslState`, `Members` ordering and diffs, `History`, `Completion`, `split_for_wire` property test, config round-trip and migrations.
 - `Script` harness over `Workspace` with virtual time (`advance`), plus `tests/scenarios/*.irc` transcripts (`> sent`, `< received`, `@ +300s`, `? members #c = @a +b c`) run by one runner.
 - Transport tests with real sockets: framing, PONG, idle close, flood pacing, rustls against an `rcgen` certificate.
-- e2e: the probe dumps sidebar rows (with classes and badges), member rows, title and input as JSON, and accepts `UiAction`s from a file. Scenarios: two servers, badges on unfocused channels, member list follows JOIN/PART/MODE, Tab completion, server-side kill and reconnect with backoff, restart restores servers and selection, TLS on Ergo's TLS port, SASL PLAIN against an Ergo account.
+- e2e: the probe dumps sidebar rows (with classes and badges), member rows, title and input as JSON, and accepts `UiAction`s from a file. Scenarios: two servers, badges on unfocused channels, member list follows JOIN/PART/MODE, collapsing the focused buffer's server, Tab completion, server-side kill and reconnect with backoff, restart restores servers, selection and expansion, TLS on Ergo's TLS port (self-signed, so the scenario sets `verify = false` and also checks that `verify = true` ends in `BadCertificate`), SASL PLAIN against an Ergo account.
 
 ## Synthesis decision
 
@@ -151,7 +154,7 @@ Per the candidates: protocol state in a tokio actor with a UI mirror (two copies
 
 ## Interrogation
 
-Two adversaries probed this design before implementation (`docs/design/phase2-candidates/` has the brief). Corrections folded in above, each reproduced by rerunning the adversary's probe: the attempt counter lives on `Network`; pre-001 nick padding cannot use NICKLEN; a rebuilt buffer ignores that pass's payloads; `Line` takes time and id from the caller. Folded in from the text alone (the probes against Ergo were throttled on rerun): the split budget counts reopening codes; STATUSMSG is stripped before routing and echoes are deduplicated by `msgid`.
+Two adversaries probed this design before implementation (`docs/design/phase2-candidates/` has the brief). Corrections folded in above, each reproduced by rerunning the adversary's probe: the attempt counter lives on `Network`; pre-001 nick padding cannot use NICKLEN; a rebuilt buffer ignores that pass's payloads; `Line` takes time and id from the caller. Folded in from the text alone (the probes against Ergo were throttled on rerun): the split budget counts reopening codes; STATUSMSG is stripped before routing and echoes are deduplicated by `msgid`. From the GTK and runtime prototypes, all reproduced: the model owns expansion and the collapse/focus rules, the view listens to `notify::selected-item`, and the loop holds `runtime.enter()` and sleeps with tokio. Confirmed by the same prototypes: oo7 works from the tokio runtime while the GLib loop runs (D-Bus Secret Service, about 30 ms for create, search, read and delete); `rustls-platform-verifier` validates real certificates on Ubuntu 24.04; `related_view` exists in webkit6 0.6 for the shared web process; `BoxedAnyObject`-free GObject rows keep selection and expansion across in-place updates and sibling inserts.
 
 ## Implementation reconciliation
 
