@@ -160,6 +160,15 @@ class Probe:
         return self.wait_until(lambda s: predicate(s["view"]), what, timeout)["view"]
 
 
+def cpu_seconds(pid):
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
+def app_pid(app):
+    return next(pid for pid, comm in descendants(app.pid) if comm == "textual-gtk")
+
+
 def opaque_at(png, x, y):
     with Image.open(png) as image:
         image = image.convert("RGBA")
@@ -293,6 +302,16 @@ def main():
         view = probe.wait_view(lambda v: v["focus"] == f"Local/{channel2}", "channel2 to take the focus")
         cleared = row(view, f"Local/{channel2}")
         checks["selecting the channel clears its badge and classes"] = cleared["badge"] == "" and not {"has-unread", "has-highlight"} & set(cleared["classes"])
+
+        pid = app_pid(app)
+        probe.act({"select": f"Local/{channel}"}, {"select": f"Local/{channel2}"})
+        time.sleep(3)
+        json_path = prefix.with_suffix(".json")
+        written, cpu = json_path.stat().st_mtime, cpu_seconds(pid)
+        time.sleep(3)
+        checks["two selections in one tick settle on the second"] = probe.state()["view"]["focus"] == f"Local/{channel2}"
+        checks["the probe keeps writing after two selections in one tick"] = json_path.stat().st_mtime > written
+        checks["two selections in one tick leave the app idle"] = cpu_seconds(pid) - cpu < 1.5
 
         probe.act({"select": f"Local/{channel}"})
         view = probe.wait_view(lambda v: v["focus"] == f"Local/{channel}", "the channel to take the focus again")

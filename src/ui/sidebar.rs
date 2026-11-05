@@ -2,7 +2,9 @@
 //! with their channel and query rows. Selection and expansion belong to the
 //! model; the widgets only report clicks and follow `Change`s.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -21,6 +23,27 @@ pub struct Sidebar {
     selection: gtk::SingleSelection,
     servers: HashMap<ServerId, ServerRow>,
     buffers: HashMap<BufferId, BufferRow>,
+    /// Set while the view itself moves the selection or a row's
+    /// expansion, so that move is not reported back to the model as a
+    /// click: the model already knows, and echoing two focus moves in one
+    /// pass would bounce them between the model and the list forever.
+    quiet: Quiet,
+}
+
+#[derive(Clone, Default)]
+struct Quiet(Rc<Cell<bool>>);
+
+impl Quiet {
+    fn during<R>(&self, f: impl FnOnce() -> R) -> R {
+        let was = self.0.replace(true);
+        let result = f();
+        self.0.set(was);
+        result
+    }
+
+    fn is_set(&self) -> bool {
+        self.0.get()
+    }
 }
 
 /// One visible row, for the probe.
@@ -38,6 +61,7 @@ pub struct RowInfo {
 
 impl Sidebar {
     pub fn build(tx: &Inbox) -> Self {
+        let quiet = Quiet::default();
         let root = gio::ListStore::new::<ServerRow>();
         let tree = gtk::TreeListModel::new(root.clone(), false, false, |item| {
             item.downcast_ref::<ServerRow>()
@@ -53,7 +77,11 @@ impl Sidebar {
         // emits only this notify, which the model then resolves.
         selection.connect_selected_item_notify({
             let tx = tx.clone();
+            let quiet = quiet.clone();
             move |selection| {
+                if quiet.is_set() {
+                    return;
+                }
                 let id = selection
                     .selected_item()
                     .and_downcast::<gtk::TreeListRow>()
@@ -64,7 +92,7 @@ impl Sidebar {
                 }
             }
         });
-        let list = gtk::ListView::new(Some(selection.clone()), Some(factory(tx)));
+        let list = gtk::ListView::new(Some(selection.clone()), Some(factory(tx, &quiet)));
         list.add_css_class(classes::SIDEBAR);
         let widget = gtk::ScrolledWindow::builder()
             .child(&list)
@@ -78,6 +106,7 @@ impl Sidebar {
             selection,
             servers: HashMap::new(),
             buffers: HashMap::new(),
+            quiet,
         }
     }
 
@@ -95,7 +124,8 @@ impl Sidebar {
             let row = ServerRow::new(net.id(), id, &server_text(ws, net.id()));
             self.root.append(&row);
             if let Some(tree_row) = self.server_tree_row(&row) {
-                tree_row.set_expanded(ws.is_expanded(net.id()));
+                self.quiet
+                    .during(|| tree_row.set_expanded(ws.is_expanded(net.id())));
             }
             self.servers.insert(net.id(), row);
             return;
@@ -159,10 +189,14 @@ impl Sidebar {
     /// Moves the selection to `id`'s row, expanding its server first since
     /// a collapsed child has no row to select.
     pub fn select(&self, ws: &Workspace, id: BufferId) {
-        let Some(row) = self.tree_row(ws, id) else {
-            return;
-        };
-        self.selection.set_selected(row.position());
+        self.quiet.during(|| {
+            let Some(row) = self.tree_row(ws, id) else {
+                return;
+            };
+            if self.selection.selected() != row.position() {
+                self.selection.set_selected(row.position());
+            }
+        });
     }
 
     pub fn set_expanded(&self, server: ServerId, expanded: bool) {
@@ -171,7 +205,7 @@ impl Sidebar {
             .get(&server)
             .and_then(|row| self.server_tree_row(row))
         {
-            row.set_expanded(expanded);
+            self.quiet.during(|| row.set_expanded(expanded));
         }
     }
 
@@ -266,7 +300,7 @@ fn owned(classes: Vec<&'static str>) -> Vec<String> {
 
 /// A `TreeExpander` around [label, badge]. Bind wires the row's properties
 /// to the widgets and the expander's state back to the model.
-fn factory(tx: &Inbox) -> gtk::SignalListItemFactory {
+fn factory(tx: &Inbox, quiet: &Quiet) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("a list item");
@@ -287,6 +321,7 @@ fn factory(tx: &Inbox) -> gtk::SignalListItemFactory {
     let bound = Bound::default();
     factory.connect_bind({
         let tx = tx.clone();
+        let quiet = quiet.clone();
         let bound = bound.clone();
         move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().expect("a list item");
@@ -333,7 +368,11 @@ fn factory(tx: &Inbox) -> gtk::SignalListItemFactory {
             if let Some(server) = object.downcast_ref::<ServerRow>() {
                 let id = server.server();
                 let tx = tx.clone();
+                let quiet = quiet.clone();
                 let handler = tree_row.connect_expanded_notify(move |row| {
+                    if quiet.is_set() {
+                        return;
+                    }
                     let action = UiAction::SetExpanded {
                         server: id,
                         expanded: row.is_expanded(),

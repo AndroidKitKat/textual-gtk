@@ -136,6 +136,17 @@ impl View {
         // A buffer rebuilt from the final workspace in this pass (its member
         // list reset) must not also take this pass's diffs for it.
         let mut rebuilt = HashSet::new();
+        // Only where the focus ends up is selected, once: GTK may also
+        // have moved or dropped the selection while rows came and went.
+        let reselect = changes.iter().any(|c| {
+            matches!(
+                c,
+                Change::Focus(_)
+                    | Change::Expanded(_)
+                    | Change::BufferAdded(_)
+                    | Change::BufferRemoved(_)
+            )
+        });
         for change in changes {
             match change {
                 Change::BufferAdded(id) => self.sidebar.add_buffer(ws, *id),
@@ -168,7 +179,6 @@ impl View {
                 }
                 Change::Focus(id) => {
                     self.focus.set(Some(*id));
-                    self.sidebar.select(ws, *id);
                     self.show_chat(ws, *id);
                     self.members.show(ws, *id);
                     rebuilt.insert(*id);
@@ -178,6 +188,9 @@ impl View {
                 }
                 Change::Link(server) => self.sidebar.refresh_server(ws, *server),
             }
+        }
+        if reselect && let Some(id) = ws.focus() {
+            self.sidebar.select(ws, id);
         }
         for (id, chat) in &self.chats {
             if chat.needs_replay() {
