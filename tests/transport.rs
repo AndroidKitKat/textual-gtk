@@ -206,6 +206,29 @@ async fn queued_lines_go_out_in_order_and_paced() {
 }
 
 #[tokio::test]
+async fn quit_skips_the_paced_queue() {
+    let pacing = Pacing {
+        burst: 1,
+        interval: Duration::from_secs(60),
+    };
+    let (mut server, conn, _events) = start(Settings {
+        pacing,
+        ..Settings::default()
+    })
+    .await;
+    for n in 1..=3 {
+        conn.send(wire(&format!("PRIVMSG #c :{n}")));
+    }
+    assert_eq!(server.expect().await, "PRIVMSG #c 1");
+    conn.send(wire("QUIT :bye"));
+    assert_eq!(
+        server.expect().await,
+        "QUIT bye",
+        "QUIT waited behind the queue"
+    );
+}
+
+#[tokio::test]
 async fn a_server_hangup_is_eof() {
     let (server, _conn, mut events) = start(Settings::default()).await;
     drop(server);

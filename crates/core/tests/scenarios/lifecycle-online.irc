@@ -6,7 +6,7 @@
 > dial #1 irc.test:6667 plain
 ? notice Connecting to irc.test:6667
 ? connecting
-? next-wake none
+? next-wake 45s
 ! opened
 > CAP LS 302
 > NICK textual

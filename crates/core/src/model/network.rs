@@ -26,6 +26,8 @@ const BACKOFF_CAP: Duration = Duration::from_secs(300);
 /// A link that stayed online this long was not a flapping one, so the
 /// next failure starts the backoff again.
 const STABLE_ONLINE: Duration = Duration::from_secs(60);
+/// Longer than the transport's own 30 s connect timeout.
+const CONNECT_DEADLINE: Duration = Duration::from_secs(45);
 const PING_TOKEN: &str = "textual-gtk";
 
 /// Stable identity of a configured server; seeds the backoff jitter so two
@@ -257,6 +259,9 @@ pub enum Link {
     Connecting {
         conn: ConnId,
         address: Address,
+        /// The transport times out first; this only ends a link whose
+        /// transport task died without saying so.
+        deadline: Instant,
     },
     Registering {
         conn: ConnId,
@@ -342,9 +347,11 @@ impl Network {
     /// When `update` next needs `Input::Wake`, if ever.
     pub fn next_wake(&self) -> Option<Instant> {
         match &self.link {
-            Link::Offline { .. } | Link::Connecting { .. } => None,
+            Link::Offline { .. } => None,
             Link::Waiting { until, .. } | Link::Quitting { until, .. } => Some(*until),
-            Link::Registering { deadline, .. } => Some(*deadline),
+            Link::Connecting { deadline, .. } | Link::Registering { deadline, .. } => {
+                Some(*deadline)
+            }
             Link::Online { idle, .. } => Some(idle.deadline()),
         }
     }
@@ -352,7 +359,7 @@ impl Network {
     pub fn update(&mut self, input: Input, now: Instant, out: &mut Vec<Effect>) {
         self.expire(now, out);
         match input {
-            Input::Connect => self.connect(out),
+            Input::Connect => self.connect(now, out),
             Input::Disconnect { reason } => self.disconnect(reason, now, out),
             Input::Transport { conn, event } if Some(conn) == self.conn() => {
                 self.on_transport(event, now, out);
@@ -371,14 +378,14 @@ impl Network {
         }
     }
 
-    fn connect(&mut self, out: &mut Vec<Effect>) {
+    fn connect(&mut self, now: Instant, out: &mut Vec<Effect>) {
         self.desired = Desired::Online;
         match self.link {
             Link::Offline { .. } => {
                 self.failures = 0;
-                self.dial(out);
+                self.dial(now, out);
             }
-            Link::Waiting { .. } => self.dial(out),
+            Link::Waiting { .. } => self.dial(now, out),
             // A connect while quitting dials once the quit is done.
             _ => {}
         }
@@ -387,7 +394,17 @@ impl Network {
     fn disconnect(&mut self, reason: Option<String>, now: Instant, out: &mut Vec<Effect>) {
         self.desired = Desired::Offline;
         match std::mem::replace(&mut self.link, Link::Offline { last: None }) {
-            Link::Online { conn, session, .. } => {
+            Link::Online {
+                conn,
+                session,
+                since,
+                ..
+            } => {
+                // The link ends from Quitting, where `end` cannot see how
+                // long it was online, so a stable session resets here.
+                if now.duration_since(since) >= STABLE_ONLINE {
+                    self.failures = 0;
+                }
                 out.push(Effect::Send {
                     conn,
                     line: quit_line(reason),
@@ -411,7 +428,7 @@ impl Network {
         }
     }
 
-    fn dial(&mut self, out: &mut Vec<Effect>) {
+    fn dial(&mut self, now: Instant, out: &mut Vec<Effect>) {
         let addresses = &self.config.addresses;
         let address = addresses[self.next_address].clone();
         self.next_address = (self.next_address + 1) % addresses.len();
@@ -423,7 +440,11 @@ impl Network {
             address: address.clone(),
             tls: self.config.tls,
         });
-        self.link = Link::Connecting { conn, address };
+        self.link = Link::Connecting {
+            conn,
+            address,
+            deadline: now + CONNECT_DEADLINE,
+        };
     }
 
     fn expire(&mut self, now: Instant, out: &mut Vec<Effect>) {
@@ -431,7 +452,11 @@ impl Network {
             return;
         }
         match &mut self.link {
-            Link::Waiting { .. } => self.dial(out),
+            Link::Waiting { .. } => self.dial(now, out),
+            Link::Connecting { conn, .. } => {
+                out.push(Effect::Hangup { conn: *conn });
+                self.end(Ended::Closed(CloseReason::ConnectTimeout), now, out);
+            }
             Link::Registering { conn, .. } => {
                 out.push(Effect::Hangup { conn: *conn });
                 self.end(Ended::RegistrationTimedOut, now, out);
@@ -452,7 +477,7 @@ impl Network {
                 out.push(Effect::Hangup { conn: *conn });
                 self.end(Ended::UserQuit, now, out);
             }
-            Link::Offline { .. } | Link::Connecting { .. } => {}
+            Link::Offline { .. } => {}
         }
     }
 
@@ -590,7 +615,9 @@ impl Network {
                 };
             }
             // `/reconnect` is a quit with the network still wanted online.
-            None if why == Ended::UserQuit && self.desired == Desired::Online => self.dial(out),
+            None if why == Ended::UserQuit && self.desired == Desired::Online => {
+                self.dial(now, out)
+            }
             None => self.link = Link::Offline { last: Some(why) },
         }
     }

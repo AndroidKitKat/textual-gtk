@@ -304,8 +304,14 @@ async fn talk(
                 Err(e) => Err(e),
             },
             Some(line) = incoming.recv() => {
-                queue.push_back(line);
-                Ok(None)
+                // QUIT skips the paced queue: the model hangs up after its
+                // grace period, and a QUIT still queued then is never sent.
+                if line.as_str().starts_with("QUIT") {
+                    writer.write_all(line.as_bytes()).await.map(|()| None)
+                } else {
+                    queue.push_back(line);
+                    Ok(None)
+                }
             }
             () = sleep_until(send_at.unwrap_or_else(Instant::now)), if send_at.is_some() => {
                 let line = queue.pop_front().expect("a slot is only awaited for a queued line");

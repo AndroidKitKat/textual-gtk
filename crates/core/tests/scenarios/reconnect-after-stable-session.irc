@@ -1,0 +1,36 @@
+# A /reconnect after a long stable session starts backoff from the bottom:
+# the 60 s reset applies even though the link ends from Quitting.
+! connect
+> dial #1 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+@ +10s
+! closed eof
+? notice Disconnected: the server closed the connection; reconnecting in 5 s
+? failures 1
+@ wake
+> dial #2 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+! opened
+> CAP LS 302
+> NICK textual
+> USER textual 0 * Textual
+< :irc.test 001 textual :Welcome
+@ +61s
+! disconnect Reconnecting
+> QUIT Reconnecting
+! connect
+< ERROR :Closing Link: textual (Quit: Reconnecting)
+> hangup #2
+> dial #3 irc.test:6667 plain
+? notice Disconnected: quit
+? notice Connecting to irc.test:6667
+? failures 0
+! closed error connection refused
+? notice Disconnected: connection refused; reconnecting in 5 s
+? failures 1
+? waiting 4.965s

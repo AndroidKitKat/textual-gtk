@@ -1,0 +1,10 @@
+# A transport task that never reports back does not strand the link: the
+# model gives up 45 s after dialing and retries.
+! connect
+> dial #1 irc.test:6667 plain
+? notice Connecting to irc.test:6667
+@ +45s
+> hangup #1
+? notice Disconnected: the connection timed out; reconnecting in 5 s
+? failures 1
+? waiting 4.965s
