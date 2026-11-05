@@ -171,6 +171,22 @@ Unit 3 (registration):
 - Known limitation: the nick ladder counts nick length in chars, while servers count NICKLEN in bytes, so a multi-byte nick can be padded past the server's limit and draw 432.
 - `USER name 0 * Textual`: `to_wire` adds the trailing colon only when needed, so a one-word real name goes out without it. Valid, Ergo accepts it, and phase 1 already sent it this way; the usage example above shows the colon.
 
+Unit 4 (lifecycle and transport):
+
+- `Link::Registering { conn, reg, deadline }` holds no `Session`. Nothing a `Session` holds is known before 001, so it is built from `Registered` at 001 instead of being half-filled at dial time.
+- `Waiting { until, last }` and `Connecting { conn, address }` carry no `attempt`. `Network` holds the address cursor (round-robin) next to `failures`, and `failures` is the attempt count. `Online` adds `since` and `idle: Idle { last_heard, pinged }`, from which the 270 s PING and the 360 s close are derived.
+- The 60 s reset is applied when a link ends: a link that was `Online` for at least 60 s sets `failures` to 0 before this failure counts. The backoff is the same as resetting at the 60 s mark, with no extra wake. An explicit connect from `Offline` also resets `failures`; one during `Waiting` dials at once and keeps the count.
+- Jitter only shortens: each wait is the 5 s doubling base (capped at 300 s) less up to a tenth, from a hash of (server id, failures). The cap holds and the first retry comes within 4.5 to 5 s.
+- No retry after a user quit, `Closed(CloseReason::BadCertificate { sha256 })` (nested in `Ended::Closed` rather than a top-level variant), `465` at any time (`Ended::Banned`), an ERROR whose text contains `Excess Flood` or `SendQ` (Textual also requires the `Closing Link:` prefix and the exact parenthesised suffix), a bad `Setup`, or `auto_reconnect = false`. Everything else retries, including `NoUsableNick` (the nick may be free later) and a plain ERROR such as a kill.
+- `Disconnect` while waiting cancels the retry without a notice; while dialing or registering it hangs up without QUIT; online it sends QUIT and waits 5 s in `Quitting`, which the server's ERROR, its close or the grace period ends. A `Connect` while quitting dials again once the quit is done (the shape of `/reconnect`).
+- `ConnId` is unique within one `Network`. The workspace (unit 6) routes transport events by (server, conn).
+- `ServerConfig` carries `wanted_caps` (`caps::WANTED` in the app), so transcripts can keep replacing the list with `= caps`.
+- The transcript runner drives a `Network` for every script, so `@ +Ns` now works (the unit 3 restriction is gone). A script with no `!` or `@` before its first exchange starts connected. Two unit-3 transcripts gained the hangup and retry notice that ending a link now produces.
+- The transport forwards PING to the model after answering it, so a server's PING counts as liveness; the model never answers it.
+- `Connection::hangup` (or dropping the handle) aborts the task: no `Closed` follows and queued lines are not flushed. The model only hangs up after QUIT has been answered or its grace has passed, or when the link is dead anyway.
+- Flood pacing is in: at most 6 queued lines per 2 s (Textual's defaults), as a sliding window; PONG is exempt. The 30 s connect timeout covers the TCP connect and the TLS handshake together.
+- Transition: `src/irc/connection.rs`, `tests/connection.rs` and the phase-1 `main.rs` stay unchanged and keep `scripts/e2e.py` passing. `io/transport.rs` has its own copy of `LineReader`; the old one goes when unit 6 switches the app over and deletes `connection.rs`.
+
 ## Open questions (defaults applied; Michael can override)
 
 - `/join` of an unconfigured channel adds it to `config.toml` with autojoin on (Textual's behaviour as far as the notes say; to check in `IRCClient joinChannel`).

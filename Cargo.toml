@@ -12,6 +12,12 @@ textual-core = { path = "crates/core" }
 adw = { version = "0.9", package = "libadwaita", features = ["v1_5"] }
 gtk = { version = "0.11", package = "gtk4", features = ["v4_14"] }
 serde_json = "1.0.154"
+rustls-platform-verifier = "0.7"
+sha2 = "0.11"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+tokio-rustls = "0.26"
 webkit6 = { version = "0.6", features = ["v2_52"] }
 
+
+[dev-dependencies]
+rcgen = "0.14"
