@@ -12,7 +12,9 @@ target/debug/textual-gtk \
   --network 'name=Local,host=127.0.0.1,port=6667,nick=me,join=#a #b:key'
 ```
 
-Each `--network` is a comma-separated list of `key=value` pairs and adds one network to the sidebar. `name`, `host` and `nick` are required; names must be unique. Optional: `port` (6667, or 6697 when `tls=on`), `tls=off|on` (off), `verify=true|false` (true; whether to check the server's certificate chain, with `tls=on`), `user` (the nick), `realname` (`Textual GTK`), `join` (space-separated channels to join once online; `#chan:key` for a keyed channel). `--style name` picks a folder under `resources/styling/Bundled Styles` (default `Simplified`). The saved configuration replaces these flags in a later unit.
+Each `--network` is a comma-separated list of `key=value` pairs and adds one network to the sidebar. `name`, `host` and `nick` are required; names must differ, ignoring case. Optional: `port` (1 to 65535; 6667, or 6697 when `tls=on`), `tls=off|on` (off), `verify=true|false` (true; whether to check the server's certificate chain, with `tls=on`), `user` (the nick), `realname` (`Textual GTK`), `join` (space-separated channels to join once online; `#chan:key` for a keyed channel). An unknown key, or a key given twice, is an error. To put a comma in a value, write `\,`; write `\\` for a backslash, as in `realname=Doe\, Jane`.
+
+`--style name` picks a folder under `resources/styling/Bundled Styles` (default `Simplified`). `--help` prints the usage. The saved configuration replaces these flags in a later unit.
 
 ## Checks
 
@@ -20,7 +22,7 @@ Each `--network` is a comma-separated list of `key=value` pairs and adds one net
 scripts/check.sh            # fmt, clippy, unit and integration tests
 scripts/test-server.sh      # local Ergo on 127.0.0.1:6667/6697, limits lifted for tests
 cargo test --test transport -- --ignored    # the model and transport against the real server
-python3 scripts/e2e.py      # the app under Xvfb on two networks: sidebar, members, badges, reload, quit
+python3 scripts/e2e.py      # the app under Xvfb on two networks and a fake server: sidebar, members, badges, reload, quit
 ```
 
 ## License

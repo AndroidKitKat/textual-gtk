@@ -18,7 +18,19 @@ use textual_gtk::ui::view::View;
 
 const APP_ID: &str = "io.github.androidkitkat.TextualGtk";
 const USAGE: &str = "usage: textual-gtk --network 'name=Local,host=127.0.0.1,port=6667,tls=off,nick=me,join=#a #b' [--network ...] [--style name]
-network keys: name, host, nick (required); port (6667, or 6697 with tls=on); tls=off|on; verify=true|false (with tls=on); user (the nick); realname; join (space-separated channels, #chan:key for a key)";
+network keys: name, host, nick (required); port (1-65535; 6667, or 6697 with tls=on); tls=off|on; verify=true|false (with tls=on); user (the nick); realname; join (space-separated channels, #chan:key for a key)
+write \\, for a comma inside a value and \\\\ for a backslash";
+
+/// The keys a `--network` spec may set.
+const NETWORK_KEYS: &[&str] = &[
+    "name", "host", "port", "tls", "verify", "nick", "user", "realname", "join",
+];
+
+#[derive(Debug)]
+enum Command {
+    Help,
+    Run(Options),
+}
 
 #[derive(Debug)]
 struct Options {
@@ -26,11 +38,14 @@ struct Options {
     style: String,
 }
 
-fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> {
+fn parse_options(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut networks = Vec::new();
     let mut style = "Simplified".to_owned();
     let mut args = args;
     while let Some(flag) = args.next() {
+        if flag == "--help" || flag == "-h" {
+            return Ok(Command::Help);
+        }
         let value = args.next().ok_or(format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--network" => networks.push(parse_network(&value, networks.len() as u128 + 1)?),
@@ -42,21 +57,55 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
         return Err(USAGE.to_owned());
     }
     for (i, net) in networks.iter().enumerate() {
-        if networks[..i].iter().any(|n| n.name == net.name) {
+        let name = net.name.to_lowercase();
+        if networks[..i].iter().any(|n| n.name.to_lowercase() == name) {
             return Err(format!("two networks are named {}", net.name));
         }
     }
-    Ok(Options { networks, style })
+    Ok(Command::Run(Options { networks, style }))
+}
+
+fn boolean(key: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!("{key}={other}: expected true or false")),
+    }
+}
+
+/// Splits a spec at the commas that are not escaped as `\,`; `\\` is a
+/// backslash.
+fn split_fields(spec: &str) -> Result<Vec<String>, String> {
+    let mut fields = vec![String::new()];
+    let mut chars = spec.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ',' => fields.push(String::new()),
+            '\\' => match chars.next() {
+                Some(escaped @ (',' | '\\')) => fields.last_mut().unwrap().push(escaped),
+                _ => return Err(format!("{spec:?}: a backslash must come before , or \\")),
+            },
+            c => fields.last_mut().unwrap().push(c),
+        }
+    }
+    Ok(fields)
 }
 
 /// `key=value,key=value`; `join` takes a space-separated list.
 fn parse_network(spec: &str, index: u128) -> Result<ServerConfig, String> {
     let mut fields = std::collections::HashMap::new();
-    for pair in spec.split(',').filter(|p| !p.trim().is_empty()) {
+    let pairs = split_fields(spec)?;
+    for pair in pairs.iter().filter(|p| !p.trim().is_empty()) {
         let (key, value) = pair
             .split_once('=')
             .ok_or(format!("{pair:?} is not key=value"))?;
-        fields.insert(key.trim(), value.trim());
+        let key = key.trim();
+        if !NETWORK_KEYS.contains(&key) {
+            return Err(format!("unknown --network key {key:?}"));
+        }
+        if fields.insert(key, value.trim()).is_some() {
+            return Err(format!("--network sets {key} twice"));
+        }
     }
     let required = |key: &str| {
         fields
@@ -71,16 +120,16 @@ fn parse_network(spec: &str, index: u128) -> Result<ServerConfig, String> {
     let tls = match fields.get("tls").copied().unwrap_or("off") {
         "off" => Tls::Off,
         "on" => Tls::On {
-            verify: match fields.get("verify").copied().unwrap_or("true") {
-                "true" => true,
-                "false" => false,
-                other => return Err(format!("verify={other}: expected true or false")),
-            },
+            verify: boolean("verify", fields.get("verify").copied().unwrap_or("true"))?,
         },
         other => return Err(format!("tls={other}: expected on or off")),
     };
     let port = match fields.get("port") {
-        Some(p) => p.parse().map_err(|_| format!("bad port {p}"))?,
+        Some(p) => p
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p != 0)
+            .ok_or(format!("port={p}: expected 1-65535"))?,
         None if matches!(tls, Tls::On { .. }) => 6697,
         None => 6667,
     };
@@ -133,7 +182,11 @@ fn resources_dir() -> PathBuf {
 
 fn main() -> glib::ExitCode {
     let options = match parse_options(std::env::args().skip(1)) {
-        Ok(options) => options,
+        Ok(Command::Run(options)) => options,
+        Ok(Command::Help) => {
+            println!("{USAGE}");
+            return glib::ExitCode::SUCCESS;
+        }
         Err(e) => {
             eprintln!("textual-gtk: {e}");
             return glib::ExitCode::from(2);
@@ -246,7 +299,14 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Options, String> {
-        parse_options(args.iter().map(|a| (*a).to_owned()))
+        match parse_options(args.iter().map(|a| (*a).to_owned()))? {
+            Command::Run(options) => Ok(options),
+            Command::Help => Err("help".to_owned()),
+        }
+    }
+
+    fn one(spec: &str) -> Result<ServerConfig, String> {
+        parse(&["--network", spec]).map(|mut o| o.networks.remove(0))
     }
 
     #[test]
@@ -312,5 +372,71 @@ mod tests {
             "name=a,host=h2,nick=n",
         ]);
         assert_eq!(twice.unwrap_err(), "two networks are named a");
+    }
+
+    #[test]
+    fn help_asks_for_the_usage() {
+        for flag in ["--help", "-h"] {
+            let command = parse_options([flag.to_owned()].into_iter()).unwrap();
+            assert!(matches!(command, Command::Help), "{flag}");
+        }
+        let late = ["--network", "name=a,host=h,nick=n", "--help"].map(str::to_owned);
+        assert!(matches!(
+            parse_options(late.into_iter()).unwrap(),
+            Command::Help
+        ));
+    }
+
+    #[test]
+    fn an_unknown_key_is_named() {
+        assert_eq!(
+            one("name=a,host=h,nick=n,prot=7000").unwrap_err(),
+            "unknown --network key \"prot\""
+        );
+    }
+
+    #[test]
+    fn a_key_given_twice_is_refused() {
+        assert_eq!(
+            one("name=a,host=h,nick=n,nick=m").unwrap_err(),
+            "--network sets nick twice"
+        );
+    }
+
+    #[test]
+    fn the_port_is_1_to_65535() {
+        for bad in ["0", "65536", "-1", "x"] {
+            assert_eq!(
+                one(&format!("name=a,host=h,nick=n,port={bad}")).unwrap_err(),
+                format!("port={bad}: expected 1-65535")
+            );
+        }
+        assert_eq!(
+            one("name=a,host=h,nick=n,port=65535").unwrap().addresses[0].port,
+            65535
+        );
+        assert_eq!(
+            one("name=a,host=h,nick=n,port=1").unwrap().addresses[0].port,
+            1
+        );
+    }
+
+    #[test]
+    fn network_names_differ_regardless_of_case() {
+        let twice = parse(&[
+            "--network",
+            "name=Libera,host=h,nick=n",
+            "--network",
+            "name=libera,host=h2,nick=n",
+        ]);
+        assert_eq!(twice.unwrap_err(), "two networks are named libera");
+    }
+
+    #[test]
+    fn an_escaped_comma_stays_in_the_value() {
+        let net = one(r"name=a,host=h,nick=n,realname=Doe\, Jane \\o/").unwrap();
+        assert_eq!(net.setup.realname, r"Doe, Jane \o/");
+        assert_eq!(net.setup.nick, "n");
+        assert!(one(r"name=a,host=h,nick=n,realname=a\b").is_err());
     }
 }
